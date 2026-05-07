@@ -1,4 +1,4 @@
-﻿\begin{titlepage}
+\begin{titlepage}
 \thispagestyle{empty}
 
 \begin{tikzpicture}[remember picture,overlay,inner sep=0,outer sep=0]
@@ -13,7 +13,7 @@
 
 
 \centering
-\vspace*{0.7cm}
+\vspace*{0.35cm}
 
 {\large \textbf{\universityname}\par}
 {\large \textbf{\schoolname}\par}
@@ -21,29 +21,50 @@
 
 \vspace{1.1cm}
 \IfFileExists{\covericonlogo}{
-    \includegraphics[width=0.5\textwidth]{\covericonlogo}\par
-    \vspace{1.1cm}
+    \includegraphics[width=0.34\textwidth]{\covericonlogo}\par
+    \vspace{0.55cm}
 }{}
 
-{\Large \textbf{\coursename}\par}
-\vspace{1.0cm}
-{\Huge \bfseries \reporttitle\par}
-\vspace{0.6cm}
-{\Large \labtitle\par}
+{\normalsize \textbf{\coursename}\par}
 \vspace{0.45cm}
-{\normalsize \textcolor{softgray}{\semester}\par}
+{\LARGE \bfseries \reporttitle\par}
+\vspace{0.3cm}
+{\large \labtitle\par}
+\vspace{0.22cm}
+{\small \textcolor{softgray}{\semester}\par}
 
-\vfill
+\vspace{0.55cm}
 
-\renewcommand{\arraystretch}{1.55}
+{\small
+\renewcommand{\arraystretch}{1.08}
 \begin{tabularx}{0.8\textwidth}{>{\bfseries}p{4.6cm}X}
 \instructorlabel & \instructor \\
-\studentlabel & \studentname \\
-\studentidlabel & \studentid \\
 \classlabel & \classname \\
-\end{tabularx}
+\end{tabularx}\par}
 
-\vspace{0.9cm}
-{\locationanddate\par}
+\vspace{0.3cm}
+{\footnotesize \textbf{\membertabletitle}\par}
+\vspace{0.1cm}
+{\scriptsize
+\renewcommand{\arraystretch}{1.0}
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{0.82\textwidth}{|>{\centering\arraybackslash}p{0.75cm}|X|>{\centering\arraybackslash}p{1.9cm}|>{\centering\arraybackslash}p{2.0cm}|}
+\hline
+\textbf{STT} & \textbf{Họ và tên} & \textbf{MSSV} & \textbf{Đóng góp} \\
+\hline
+1 & Nguyễn Thái Hoàng & 2311062 & 100\% \\
+\hline
+2 &  &  &  \\
+\hline
+3 &  &  &  \\
+\hline
+4 &  &  &  \\
+\hline
+5 &  &  &  \\
+\hline
+\end{tabularx}\par}
+
+\vspace{0.35cm}
+{\small \locationanddate\par}
 \vspace*{0.8cm}
 \end{titlepage}
