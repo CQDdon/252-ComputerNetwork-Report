@@ -8,7 +8,66 @@ Client gửi credential trong header \texttt{Authorization}. Hai scheme cổ đi
     \item \textbf{Digest:} client không gửi password trực tiếp mà gửi digest tính từ username, password, nonce và thông tin request. Digest giảm rủi ro lộ password so với Basic nhưng phức tạp hơn.
 \end{itemize}
 
-Trong hệ thống mẫu, HTTP server có thể dùng Basic authentication cho phần login hoặc route quản trị, sau đó cấp session cookie cho các request tiếp theo.
+Trong hệ thống đã triển khai, nhóm chọn mô hình lai: Basic/Digest dùng cho bước xác thực ban đầu hoặc cho các route bảo vệ khi client chưa có session; sau khi đăng nhập thành công, server phát session cookie để các request tiếp theo không phải gửi lại username/password. Cách làm này phù hợp với yêu cầu đề bài vì vừa bám theo khung xác thực HTTP chuẩn, vừa tận dụng cơ chế cookie để duy trì trạng thái đăng nhập.
+
+Credential người dùng được nạp từ \texttt{db/users.json} và cache trong bộ nhớ để tra cứu nhanh. Sau khi kiểm tra hợp lệ, server tạo một session id ngẫu nhiên, lưu ánh xạ session với user trong bộ nhớ kèm thời gian sống, rồi trả cookie phiên cho browser. Ngoài ra, implementation còn lưu trạng thái user đang hoạt động theo từng HTTP port để tránh cùng một tài khoản đăng nhập đồng thời ở nhiều instance backend khác nhau.
+
+\subsection{Luồng xác thực hoàn chỉnh}
+Hình dung luồng xử lý end-to-end của hệ thống như sau:
+
+\begin{lstlisting}[style=engineering,caption={Luồng xác thực đầy đủ của HTTP server}]
+Client                    HTTP Server / Middleware              Auth store
+  |                               |                                |
+  | POST /login + JSON creds      |                                |
+  |------------------------------>|                                |
+  |                               | parse method, headers, body    |
+  |                               |------------------------------->|
+  |                               | validate username/password     |
+  |                               |<-------------------------------|
+  |                               | create session + set cookie    |
+  |<------------------------------|                                |
+  | 200 OK + Set-Cookie           |                                |
+  |                               |                                |
+  | GET /api/self + Cookie        |                                |
+  |------------------------------>|                                |
+  |                               | verify session                 |
+  |                               |------------------------------->|
+  |                               |<-------------------------------|
+  |<------------------------------|                                |
+  | 200 OK + protected resource   |                                |
+  |                               |                                |
+  | POST /logout + Cookie         |                                |
+  |------------------------------>|                                |
+  |                               | delete session + expire cookie |
+  |<------------------------------|                                |
+  | 200 OK + Set-Cookie Max-Age=0 |                                |
+  |                               |                                |
+  | GET /api/self (khong co auth) |                                |
+  |------------------------------>|                                |
+  |<------------------------------|                                |
+  | 401 + WWW-Authenticate        |                                |
+\end{lstlisting}
+
+Luồng trên có thể diễn giải thành các bước cụ thể:
+\begin{enumerate}[leftmargin=2em]
+    \item Client gửi request \texttt{POST /login} kèm body JSON chứa \texttt{username} và \texttt{password}.
+    \item Lớp request parser tách request line, header, body và cookie; nếu \texttt{Content-Type} là \texttt{application/json} thì body được parse sang object để handler đăng nhập sử dụng.
+    \item Handler \texttt{/login} ưu tiên kiểm tra credential trong JSON body. Nếu body không chứa đủ thông tin, server có thể fallback sang \texttt{Authorization: Basic} hoặc \texttt{Authorization: Digest}.
+    \item Nếu credential hợp lệ, server tạo session mới, gắn cookie phiên vào response thông qua header \texttt{Set-Cookie}.
+    \item Ở các request sau, client chỉ cần gửi lại cookie phiên; middleware sẽ kiểm tra session trước khi cho phép đi vào protected route.
+    \item Khi người dùng chọn logout, client gửi \texttt{POST /logout} kèm cookie phiên hiện tại; server xóa session phía server và trả lại \texttt{Set-Cookie} với \texttt{Max-Age=0} để buộc trình duyệt hủy cookie.
+    \item Sau logout, nếu client truy cập lại route bảo vệ mà không xác thực mới, server trả về \texttt{401 Unauthorized} và gắn \texttt{WWW-Authenticate} để yêu cầu đăng nhập lại.
+    \item Nếu client dùng Basic/Digest hợp lệ tại protected route, request vẫn có thể được chấp nhận ngay cả khi chưa có session cookie.
+\end{enumerate}
+
+Ví dụ request đăng nhập bằng JSON:
+\begin{lstlisting}[style=engineering,caption={Request login với JSON credential}]
+POST /login HTTP/1.1
+Host: 127.0.0.1:2026
+Content-Type: application/json
+
+{"username":"admin","password":"xoilactv"}
+\end{lstlisting}
 
 \subsection{Cookie-based session}
 RFC 6265 định nghĩa cơ chế HTTP cookie. Server gửi cookie bằng header \texttt{Set-Cookie}; browser lưu cookie và tự động gửi lại trong header \texttt{Cookie} ở các request phù hợp.
@@ -21,13 +80,59 @@ Một session cookie nên có các thuộc tính:
     \item \texttt{Max-Age} hoặc không đặt thời hạn: nếu không đặt thời hạn, cookie trở thành session cookie và thường hết hạn khi browser session kết thúc.
 \end{itemize}
 
+Trong implementation hiện tại, tên cookie được đặt theo port của HTTP app, ví dụ \texttt{session\_2026}. Thiết kế này giúp tách biệt session giữa nhiều instance server đang chạy song song trên các cổng khác nhau. Cookie được lưu với \texttt{Path=/}, \texttt{HttpOnly}, \texttt{SameSite=Lax} và \texttt{Max-Age}; đây là mức cấu hình đủ tốt cho môi trường demo cục bộ bằng HTTP.
+
 Ví dụ response sau login thành công:
 \begin{lstlisting}[style=engineering,caption={Set session cookie sau khi xác thực}]
 HTTP/1.1 200 OK
-Set-Cookie: sid=<random-session-id>; Path=/; HttpOnly; SameSite=Lax
+Set-Cookie: session_2026=<random-session-id>; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800
 Content-Type: application/json
 
 {"ok": true}
 \end{lstlisting}
 
-Server lưu ánh xạ \texttt{sid -> user/session state}. Các route bảo vệ kiểm tra cookie \texttt{sid}; nếu thiếu hoặc hết hạn thì trả \texttt{401 Unauthorized}.
+Server lưu ánh xạ \texttt{session\_id -> user/session state}. Các route bảo vệ kiểm tra cookie phiên; nếu thiếu hoặc hết hạn thì trả \texttt{401 Unauthorized}. Thời gian sống của session và nonce đều được giới hạn để tránh việc token cũ bị tái sử dụng quá lâu.
+
+Ví dụ request truy cập route bảo vệ bằng cookie:
+\begin{lstlisting}[style=engineering,caption={Request đến route bảo vệ với session cookie}]
+GET /api/self HTTP/1.1
+Host: 127.0.0.1:2026
+Cookie: session_2026=<random-session-id>
+\end{lstlisting}
+
+Ví dụ request logout và phản hồi xóa cookie:
+\begin{lstlisting}[style=engineering,caption={Logout và hủy session cookie}]
+POST /logout HTTP/1.1
+Host: 127.0.0.1:2026
+Cookie: session_2026=<random-session-id>
+
+HTTP/1.1 200 OK
+Set-Cookie: session_2026=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0
+Content-Type: application/json
+
+{"status":"ok","message":"logged_out"}
+\end{lstlisting}
+
+\subsection{Xử lý lỗi và phản hồi xác thực}
+Khi xác thực thất bại, server không chỉ trả mã lỗi mà còn cung cấp thông tin để client biết cách xác thực lại:
+\begin{itemize}[leftmargin=2em]
+    \item Nếu request không mang cookie hợp lệ và cũng không có \texttt{Authorization} hợp lệ, server trả \texttt{401 Unauthorized} kèm \texttt{WWW-Authenticate}.
+    \item Với Basic authentication, challenge có thể yêu cầu client gửi lại username/password theo realm đã khai báo.
+    \item Với Digest authentication, server phát \texttt{nonce} và \texttt{opaque}; nếu \texttt{nonce} cũ hết hạn, challenge có thể trả thêm cờ \texttt{stale=true} để yêu cầu client tạo lại digest mới.
+    \item Nếu đăng nhập thành công nhưng session hết hạn ở request sau, client phải xác thực lại để nhận session mới.
+    \item Nếu người dùng đã logout, session cũ bị vô hiệu hóa nên cookie cũ không còn giá trị ngay cả khi client vẫn cố gửi lại request cũ.
+\end{itemize}
+
+Ví dụ phản hồi khi chưa được xác thực:
+\begin{lstlisting}[style=engineering,caption={Response 401 yêu cầu xác thực lại}]
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Basic realm="AsynapRous"
+Content-Type: application/json
+
+{"status":"error","error":"authentication_required"}
+\end{lstlisting}
+
+\subsection{Nhận xét về lựa chọn thiết kế}
+Giải pháp hiện tại có một số ưu điểm rõ ràng. Thứ nhất, nó bám sát đề bài khi hỗ trợ cả hai hướng là HTTP authentication và cookie-based session. Thứ hai, việc ưu tiên session cookie ở các request sau giúp giảm việc lặp lại credential nhạy cảm trên đường truyền. Thứ ba, việc hỗ trợ thêm Digest cho phép hệ thống minh họa cơ chế challenge-response đầy đủ hơn so với chỉ dùng Basic.
+
+Tuy nhiên, đây vẫn là implementation phục vụ mục đích học tập và demo cục bộ. Báo cáo nên nêu rõ rằng cookie hiện chưa dùng thuộc tính \texttt{Secure} vì hệ thống chạy trên HTTP thường thay vì HTTPS; do đó nếu triển khai thực tế thì cần bật HTTPS, bổ sung \texttt{Secure}, tăng cường chính sách hết hạn session và mở rộng cơ chế thu hồi session theo nhiều thiết bị hoặc toàn hệ thống nếu bài toán thực tế yêu cầu.
