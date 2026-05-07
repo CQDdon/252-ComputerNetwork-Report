@@ -1,0 +1,29 @@
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.toc
+*.lof
+*.lot
+*.bcf
+*.run.xml
+*.nav
+*.snm
+*.vrb
+*.xdv
+
+# Common TeX scratch output
+texput.log
+
+# Output PDFs (built locally)
+*.pdf
+
+# OS/editor noise
+Thumbs.db
+Desktop.ini
+.DS_Store

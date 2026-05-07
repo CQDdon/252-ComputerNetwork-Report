@@ -1,0 +1,47 @@
+@startuml architecture-overview
+title Runtime Architecture: HTTP Control Plane and TCP P2P Data Plane
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam packageStyle rectangle
+
+actor "Browser A" as BrowserA
+actor "Browser B" as BrowserB
+
+package "Control Plane - HTTP" {
+  component "sampleapp A\nHTTP API\n:2026" as SampleA
+  component "sampleapp B\nHTTP API\n:2027" as SampleB
+  component "trackerapp\nPeer registry\nChannel metadata\n:9000" as Tracker
+  database "db/users.json\nactive_sessions.json" as AuthStore
+}
+
+package "Data Plane - TCP P2P" {
+  component "PeerManager A\nTCP listener\n:9101" as PeerA
+  component "PeerManager B\nTCP listener\n:9102" as PeerB
+}
+
+package "DHT Overlay (Channeling)" {
+  component "DHTOverlay A\nsuccessor/finger state" as DhtA
+  component "DHTOverlay B\nsuccessor/finger state" as DhtB
+}
+
+BrowserA --> SampleA : HTTP UI/API\nlogin, peers, connect, send
+BrowserB --> SampleB : HTTP UI/API\nlogin, peers, connect, send
+
+SampleA --> AuthStore : validate credentials\ncreate session cookie
+SampleB --> AuthStore : validate credentials\ncreate session cookie
+
+SampleA --> Tracker : /register\n/heartbeat\n/peers\n/channels
+SampleB --> Tracker : /register\n/heartbeat\n/peers\n/channels
+
+SampleA --> PeerA : local method calls\nconnect_peer, send_chat
+SampleB --> PeerB : local method calls\nconnect_peer, send_chat
+
+PeerA <--> PeerB : TCP P2P frames\n4-byte length + JSON\nhello/chat/ack/ping/pong/goodbye
+
+DhtA --> PeerA : uses PeerManager transport
+DhtB --> PeerB : uses PeerManager transport
+DhtA <..> DhtB : DHT routing for channels\nowner lookup (successor)\nowner fan-out saves resources
+
+@enduml

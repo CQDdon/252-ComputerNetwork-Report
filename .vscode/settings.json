@@ -1,22 +1,24 @@
 {
   "latex-workshop.latex.tools": [
     {
-      "name": "pdflatex",
+      "name": "pdflatex-main",
       "command": "pdflatex",
       "args": [
         "-synctex=1",
         "-interaction=nonstopmode",
         "-file-line-error",
-        "%DOC%"
+        "-halt-on-error",
+        "-output-directory=%WORKSPACE_FOLDER%",
+        "%WORKSPACE_FOLDER%/main.tex"
       ]
     }
   ],
   "latex-workshop.latex.recipes": [
     {
-      "name": "pdflatex x2",
+      "name": "Build report main.tex (pdflatex x2)",
       "tools": [
-        "pdflatex",
-        "pdflatex"
+        "pdflatex-main",
+        "pdflatex-main"
       ]
     }
   ],
