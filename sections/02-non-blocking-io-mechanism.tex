@@ -1,0 +1,39 @@
+\section{Non-blocking I/O Mechanism}
+\subsection{Blocking và non-blocking socket}
+Với blocking socket, lời gọi \texttt{accept()}, \texttt{recv()} hoặc \texttt{send()} có thể giữ luồng thực thi cho đến khi có kết nối, có dữ liệu hoặc buffer hệ điều hành sẵn sàng. Cách này đơn giản nhưng dễ làm một peer bị treo nếu một kết nối chậm hoặc không phản hồi.
+
+Với non-blocking socket, socket trả về ngay cả khi thao tác chưa thể hoàn tất. Chương trình không chờ bị động trên từng socket, mà dùng selector để biết socket nào đã sẵn sàng đọc hoặc ghi. Nhờ vậy một event loop có thể quản lý nhiều kết nối đồng thời mà không cần tạo một thread cho mỗi peer.
+
+\subsection{Selector event loop}
+Selector theo dõi tập socket đã đăng ký và báo readiness:
+\begin{itemize}[leftmargin=2em]
+    \item \textbf{Read readiness:} listener sẵn sàng \texttt{accept()}, hoặc socket kết nối đã có byte để đọc.
+    \item \textbf{Write readiness:} socket có thể gửi thêm byte từ outbound queue.
+    \item \textbf{Timeout:} event loop có thể dùng timeout để kiểm tra handshake deadline, ping interval và cleanup peer lỗi.
+\end{itemize}
+
+Readiness không có nghĩa là toàn bộ message đã có sẵn hoặc toàn bộ payload có thể gửi một lần. Vì vậy implementation phải xử lý partial \texttt{recv()} và partial \texttt{send()}.
+
+\subsection{Partial send/recv và frame buffer}
+TCP là byte stream, không giữ ranh giới message. Một lần \texttt{recv()} có thể nhận nửa frame, đúng một frame hoặc nhiều frame liền nhau. Do đó mỗi connection cần một receive buffer:
+\begin{enumerate}[leftmargin=2em]
+    \item đọc byte mới và append vào buffer;
+    \item nếu buffer chưa đủ 4 byte length prefix thì chờ thêm;
+    \item đọc độ dài frame từ 4 byte đầu;
+    \item nếu buffer chưa đủ payload JSON thì chờ thêm;
+    \item khi đủ frame, parse JSON và dispatch message type;
+    \item giữ lại byte dư cho frame kế tiếp.
+\end{enumerate}
+
+Tương tự, \texttt{send()} có thể chỉ gửi được một phần payload. Mỗi connection cần outbound queue chứa các buffer chưa gửi xong. Khi selector báo writable, PeerManager tiếp tục gửi phần còn lại.
+
+\subsection{Gắn với PeerManager}
+PeerManager dùng non-blocking I/O theo các nguyên tắc:
+\begin{itemize}[leftmargin=2em]
+    \item listener socket được đặt non-blocking và đăng ký read event;
+    \item socket sau \texttt{accept()} cũng được đặt non-blocking;
+    \item mỗi connection có frame buffer riêng cho inbound data;
+    \item mỗi connection có outbound queue riêng cho pending frames;
+    \item event loop xử lý read/write readiness, handshake timeout, heartbeat và cleanup;
+    \item mọi message gửi ra đều được encode thành frame trước khi đưa vào queue.
+\end{itemize}

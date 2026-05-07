@@ -1,0 +1,33 @@
+\section{Testing \& Failure Handling}
+Kiểm thử tập trung vào protocol P2P, cơ chế non-blocking I/O và hành vi khi có lỗi. Các test đã passed chứng minh hệ thống xử lý được cả luồng bình thường và các tình huống biên.
+
+\subsection{Test cases}
+\begin{longtable}{|p{4cm}|p{9cm}|}
+\hline
+\textbf{Test case} & \textbf{Kết quả mong đợi} \\
+\hline
+Send before connect & PeerManager từ chối gửi, trả lỗi rõ ràng hoặc queue theo chính sách cấu hình; không crash. \\
+\hline
+Malformed message & Receiver phát hiện JSON sai hoặc thiếu field bắt buộc, gửi \texttt{error} và có thể đóng connection. \\
+\hline
+Handshake timeout & Connection ở \texttt{hello\_pending} quá thời hạn sẽ bị đóng và cleanup khỏi selector. \\
+\hline
+Peer failure cleanup & Khi peer đóng bất ngờ hoặc socket lỗi, PeerManager loại connection khỏi peer table và giải phóng buffer/queue. \\
+\hline
+Duplicate connect & Nếu hai peer mở kết nối trùng nhau, hệ thống giữ một connection hợp lệ theo tie-break rule, ví dụ so sánh \texttt{peer\_id}. \\
+\hline
+Broadcast partial failure & Broadcast vẫn gửi đến các peer còn sống; peer lỗi được ghi nhận riêng, không làm hỏng toàn bộ thao tác. \\
+\hline
+\end{longtable}
+
+\subsection{Failure handling}
+\textbf{Malformed frame:} nếu length prefix quá lớn, âm theo parse lỗi, hoặc payload không phải JSON hợp lệ, receiver gửi \texttt{error} rồi đóng kết nối để bảo vệ event loop.
+
+\textbf{Partial send failure:} nếu socket lỗi khi outbound queue còn dữ liệu, message liên quan được đánh dấu failed. Các message đã ack trước đó vẫn giữ trạng thái delivered.
+
+\textbf{Handshake failure:} nếu peer không gửi \texttt{hello}, gửi sai version hoặc trùng \texttt{peer\_id} bất thường, connection không được chuyển sang active.
+
+\textbf{Heartbeat và ping/pong:} trong data plane, \texttt{ping}/\texttt{pong} giúp phát hiện kết nối chết nhưng chưa đóng rõ ràng. Nếu quá nhiều lần ping timeout, PeerManager cleanup socket và thông báo lên sampleapp.
+
+\subsection{Kết luận kiểm thử}
+Các test passed cho thấy thiết kế tách control plane/data plane hoạt động đúng: tracker hỗ trợ bootstrap và discovery, còn live message đi qua TCP P2P. Non-blocking event loop giúp PeerManager xử lý nhiều socket mà vẫn kiểm soát được partial frame, outbound queue và cleanup khi lỗi.

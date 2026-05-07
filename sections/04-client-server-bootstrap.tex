@@ -1,0 +1,32 @@
+\section{Client-server Bootstrap}
+Tracker là thành phần control plane chịu trách nhiệm bootstrap mạng peer. Tracker không chuyển tiếp live message; nhiệm vụ của nó là giúp peer biết ai đang online và có thể kết nối đến đâu.
+
+\subsection{Peer registration}
+Khi sampleapp khởi động PeerManager, peer gửi request đăng ký đến tracker với các thông tin:
+\begin{itemize}[leftmargin=2em]
+    \item \texttt{peer\_id}: định danh logic của peer;
+    \item \texttt{host}: địa chỉ IP hoặc hostname mà peer lắng nghe;
+    \item \texttt{port}: TCP listen port của PeerManager;
+    \item \texttt{capabilities}: các tính năng hỗ trợ như chat, broadcast hoặc channel;
+    \item \texttt{last\_seen}: thời điểm tracker ghi nhận peer còn sống.
+\end{itemize}
+
+Tracker lưu danh sách active peers trong bộ nhớ hoặc file trạng thái. Mỗi peer record có TTL để tránh giữ peer đã chết mãi mãi.
+
+\subsection{Heartbeat}
+Peer gửi heartbeat định kỳ để gia hạn trạng thái online. Nếu tracker không nhận heartbeat trong một khoảng thời gian cấu hình trước, tracker đánh dấu peer là expired và loại khỏi kết quả discovery.
+
+Heartbeat không cần chứa message chat. Nó chỉ là tín hiệu control plane cho biết peer vẫn đang lắng nghe và sẵn sàng kết nối.
+
+\subsection{Discovery}
+Khi peer A muốn kết nối peer B, sampleapp gọi tracker để lấy danh sách peer hoặc tra cứu theo \texttt{peer\_id}. Tracker trả về endpoint của peer B, ví dụ \texttt{127.0.0.1:9002}. Sau đó peer A mở kết nối TCP trực tiếp đến peer B.
+
+Luồng bootstrap:
+\begin{enumerate}[leftmargin=2em]
+    \item Peer A và Peer B register lên tracker.
+    \item Hai peer gửi heartbeat định kỳ.
+    \item Peer A request discovery từ tracker.
+    \item Tracker trả endpoint của Peer B.
+    \item Peer A thiết lập TCP P2P đến Peer B.
+    \item Tin nhắn live đi trực tiếp qua kết nối P2P.
+\end{enumerate}

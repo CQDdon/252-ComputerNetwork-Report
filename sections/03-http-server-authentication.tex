@@ -1,0 +1,33 @@
+\section{HTTP Server \& Authentication}
+\subsection{HTTP authentication}
+HTTP authentication chuẩn hóa cách server yêu cầu client chứng minh danh tính. Theo RFC 7235, khi client truy cập tài nguyên cần xác thực nhưng chưa có credential hợp lệ, server trả về mã \texttt{401 Unauthorized} kèm header \texttt{WWW-Authenticate}. Header này cho biết authentication scheme và realm mà client phải dùng.
+
+Client gửi credential trong header \texttt{Authorization}. Hai scheme cổ điển được mô tả trong RFC 2617 là:
+\begin{itemize}[leftmargin=2em]
+    \item \textbf{Basic:} username và password được nối bằng dấu hai chấm rồi Base64 encode. Scheme này đơn giản nhưng phải đi kèm HTTPS nếu dùng trong môi trường thật.
+    \item \textbf{Digest:} client không gửi password trực tiếp mà gửi digest tính từ username, password, nonce và thông tin request. Digest giảm rủi ro lộ password so với Basic nhưng phức tạp hơn.
+\end{itemize}
+
+Trong hệ thống mẫu, HTTP server có thể dùng Basic authentication cho phần login hoặc route quản trị, sau đó cấp session cookie cho các request tiếp theo.
+
+\subsection{Cookie-based session}
+RFC 6265 định nghĩa cơ chế HTTP cookie. Server gửi cookie bằng header \texttt{Set-Cookie}; browser lưu cookie và tự động gửi lại trong header \texttt{Cookie} ở các request phù hợp.
+
+Một session cookie nên có các thuộc tính:
+\begin{itemize}[leftmargin=2em]
+    \item \texttt{HttpOnly}: JavaScript phía client không đọc được cookie, giảm rủi ro khi có XSS.
+    \item \texttt{SameSite=Lax}: cookie được gửi trong điều hướng cùng site và một số top-level navigation an toàn, hạn chế CSRF cơ bản.
+    \item \texttt{Path=/}: cookie áp dụng cho toàn bộ ứng dụng.
+    \item \texttt{Max-Age} hoặc không đặt thời hạn: nếu không đặt thời hạn, cookie trở thành session cookie và thường hết hạn khi browser session kết thúc.
+\end{itemize}
+
+Ví dụ response sau login thành công:
+\begin{lstlisting}[style=engineering,caption={Set session cookie sau khi xác thực}]
+HTTP/1.1 200 OK
+Set-Cookie: sid=<random-session-id>; Path=/; HttpOnly; SameSite=Lax
+Content-Type: application/json
+
+{"ok": true}
+\end{lstlisting}
+
+Server lưu ánh xạ \texttt{sid -> user/session state}. Các route bảo vệ kiểm tra cookie \texttt{sid}; nếu thiếu hoặc hết hạn thì trả \texttt{401 Unauthorized}.

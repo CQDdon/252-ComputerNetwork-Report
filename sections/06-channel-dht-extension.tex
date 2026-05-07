@@ -1,0 +1,33 @@
+\section{Channel \& DHT Extension}
+Phần này là mở rộng nâng cao, dùng để thể hiện distributed routing và synchronization. Thay vì để tracker quản lý toàn bộ channel tập trung, hệ thống có thể dùng ý tưởng Distributed Hash Table (DHT) để xác định peer chịu trách nhiệm cho từng channel.
+
+\subsection{Hash channel name thành key}
+Mỗi channel name được hash thành một key trong không gian định danh vòng, ví dụ:
+\begin{center}
+\texttt{key = hash("network-lab") mod} $2^m$
+\end{center}
+
+Mỗi peer cũng có một key định danh. Owner của channel là successor của channel key trên vòng DHT, tức peer đầu tiên có id lớn hơn hoặc bằng key theo chiều vòng.
+
+\subsection{Route qua ring}
+Khi peer muốn join hoặc gửi message vào channel, peer không cần biết owner trực tiếp. Request có thể được route qua ring:
+\begin{enumerate}[leftmargin=2em]
+    \item peer tính key từ channel name;
+    \item peer chuyển request đến neighbor gần key hơn;
+    \item request tiếp tục đi qua ring cho đến successor;
+    \item successor trở thành owner xử lý membership và fan-out.
+\end{enumerate}
+
+\subsection{Owner fan-out đến members}
+Owner lưu danh sách members của channel. Khi nhận message cho channel, owner fan-out đến các member đang active. Nếu một member unreachable, owner đánh dấu failure và có thể retry hoặc loại khỏi membership sau TTL.
+
+Cách này cho thấy sự khác nhau giữa tracker bootstrap và distributed routing. Tracker chỉ giúp peer vào mạng ban đầu; sau đó việc định tuyến channel có thể được phân tán qua ring.
+
+\subsection{Synchronization}
+Vì owner có thể rời mạng, DHT extension cần cơ chế synchronization:
+\begin{itemize}[leftmargin=2em]
+    \item replicate metadata channel sang successor kế tiếp;
+    \item heartbeat giữa các node liền kề trong ring;
+    \item transfer ownership khi phát hiện owner cũ failed;
+    \item version hoặc timestamp cho membership update để tránh ghi đè dữ liệu cũ.
+\end{itemize}

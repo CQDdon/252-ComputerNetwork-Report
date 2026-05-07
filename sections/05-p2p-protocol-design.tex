@@ -1,0 +1,90 @@
+\section{P2P Protocol Design}
+Đây là phần trọng tâm của hệ thống. Protocol P2P phải giải quyết ba vấn đề: đóng gói message trên TCP byte stream, xác định loại message, và quản lý trạng thái kết nối giữa hai peer.
+
+\subsection{Frame format}
+Mỗi message được đóng gói thành frame:
+\begin{center}
+\texttt{[4-byte length][JSON payload]}
+\end{center}
+
+Phần length là số nguyên unsigned 32-bit theo network byte order, biểu diễn độ dài của JSON payload tính bằng byte. Payload là JSON UTF-8.
+
+\begin{lstlisting}[style=engineering,caption={Ví dụ frame payload JSON}]
+{
+  "type": "chat",
+  "id": "msg-001",
+  "from": "peerA",
+  "to": "peerB",
+  "timestamp": 1733000000,
+  "body": "Hello from peerA"
+}
+\end{lstlisting}
+
+Length prefix giúp receiver biết khi nào đã nhận đủ một message hoàn chỉnh dù TCP chia nhỏ dữ liệu thành nhiều lần \texttt{recv()}.
+
+\subsection{Message types}
+Protocol định nghĩa các message type sau:
+\begin{longtable}{|p{3cm}|p{10cm}|}
+\hline
+\textbf{Type} & \textbf{Ý nghĩa} \\
+\hline
+\texttt{hello} & Message đầu tiên sau khi kết nối TCP được mở. Chứa \texttt{peer\_id}, version protocol và capabilities. \\
+\hline
+\texttt{chat} & Tin nhắn riêng từ một peer đến một peer khác. \\
+\hline
+\texttt{broadcast} & Tin nhắn gửi đến nhiều peer đang kết nối hoặc các thành viên cùng channel. \\
+\hline
+\texttt{ack} & Xác nhận đã nhận hoặc đã xử lý một message có \texttt{id}. \\
+\hline
+\texttt{ping} & Kiểm tra kết nối còn sống và đo độ trễ. \\
+\hline
+\texttt{pong} & Phản hồi cho \texttt{ping}. \\
+\hline
+\texttt{goodbye} & Thông báo đóng kết nối có chủ đích. \\
+\hline
+\texttt{error} & Báo lỗi protocol, ví dụ JSON sai schema, type không hỗ trợ hoặc handshake không hợp lệ. \\
+\hline
+\end{longtable}
+
+\subsection{Handshake}
+Sau khi mở TCP connection, peer chủ động gửi \texttt{hello}. Peer nhận kiểm tra version, peer id và capabilities. Nếu hợp lệ, peer nhận trả \texttt{hello} hoặc \texttt{ack}; sau đó kết nối chuyển sang trạng thái active.
+
+Nếu quá thời gian mà không nhận được \texttt{hello}, PeerManager đóng connection để tránh giữ socket rác.
+
+\subsection{Connection state machine}
+Mỗi connection được quản lý bằng state machine:
+\begin{itemize}[leftmargin=2em]
+    \item \textbf{connecting:} socket đang mở hoặc vừa accept, chưa hoàn tất handshake.
+    \item \textbf{hello\_pending:} đã gửi hoặc đang chờ \texttt{hello}.
+    \item \textbf{active:} handshake thành công, có thể gửi \texttt{chat}, \texttt{broadcast}, \texttt{ping}.
+    \item \textbf{closing:} đã gửi hoặc nhận \texttt{goodbye}, đang flush outbound queue.
+    \item \textbf{closed:} socket đã đóng, connection bị loại khỏi selector và peer table.
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.2cm and 1.3cm,
+    state/.style={draw, rounded corners, align=center, minimum width=2.6cm, minimum height=0.9cm},
+    arrow/.style={-{Latex[length=3mm]}, thick}
+]
+    \node[state] (connecting) {connecting};
+    \node[state, right=of connecting] (hello) {hello\_pending};
+    \node[state, right=of hello] (active) {active};
+    \node[state, right=of active] (closing) {closing};
+    \node[state, right=of closing] (closed) {closed};
+
+    \draw[arrow] (connecting) -- node[above]{TCP open} (hello);
+    \draw[arrow] (hello) -- node[above]{hello ok} (active);
+    \draw[arrow] (active) -- node[above]{goodbye/error} (closing);
+    \draw[arrow] (closing) -- node[above]{flush/close} (closed);
+    \draw[arrow, bend right=35] (hello) to node[below]{timeout/error} (closed);
+    \draw[arrow, bend right=35] (active) to node[below]{peer failure} (closed);
+\end{tikzpicture}
+}
+\caption{State machine của một kết nối P2P}
+\end{figure}
+
+\subsection{Reliability trong phạm vi ứng dụng}
+TCP đã đảm bảo byte stream tin cậy, nhưng protocol vẫn cần \texttt{ack} ở tầng ứng dụng để xác nhận message đã được parse và xử lý. Mỗi \texttt{chat} hoặc \texttt{broadcast} có \texttt{id}; receiver gửi \texttt{ack} kèm \texttt{id}. Sender có thể log message ở trạng thái pending, delivered hoặc failed.

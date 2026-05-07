@@ -1,0 +1,48 @@
+\section{Architecture Overview}
+Hệ thống được thiết kế theo mô hình lai: HTTP được dùng cho phần điều khiển, còn TCP Peer-to-Peer được dùng cho dữ liệu tin nhắn trực tiếp giữa các peer. Mục tiêu của kiến trúc là tách rõ \textit{control plane} và \textit{data plane} để tracker chỉ hỗ trợ khám phá peer, không trở thành nút trung chuyển mọi tin nhắn.
+
+\subsection{Thành phần chính}
+\begin{itemize}[leftmargin=2em]
+    \item \textbf{Browser/Client:} giao diện người dùng, gửi request HTTP đến sampleapp.
+    \item \textbf{HTTP sampleapp:} phục vụ UI, xử lý request từ browser, quản lý PeerManager cục bộ và gọi tracker để bootstrap.
+    \item \textbf{Tracker:} lưu trạng thái peer đang hoạt động, hỗ trợ register, heartbeat và discovery.
+    \item \textbf{PeerManager:} quản lý listener TCP, kết nối P2P, hàng đợi gửi và bộ đệm nhận frame.
+    \item \textbf{Proxy tùy chọn:} có thể đứng giữa sampleapp và tracker để mô phỏng gateway hoặc reverse proxy.
+\end{itemize}
+
+\subsection{Control plane và data plane}
+\textbf{Control plane} gồm các request HTTP từ sampleapp đến tracker: đăng ký peer, heartbeat, lấy danh sách peer và lấy thông tin kết nối. Các thông điệp này nhỏ, có tính điều phối và không chứa luồng chat trực tiếp.
+
+\textbf{Data plane} là kết nối TCP P2P giữa các peer. Khi peer A đã biết địa chỉ của peer B thông qua tracker, peer A mở kết nối TCP trực tiếp đến peer B và gửi frame JSON theo protocol riêng của hệ thống. Tin nhắn live không đi qua tracker.
+
+\begin{figure}[H]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.5cm and 1.8cm,
+    box/.style={draw, rounded corners, align=center, minimum width=3cm, minimum height=1cm},
+    plane/.style={draw, dashed, rounded corners, inner sep=0.35cm},
+    arrow/.style={-{Latex[length=3mm]}, thick}
+]
+    \node[box] (browser) {Browser\\Client};
+    \node[box, right=of browser] (sampleapp) {HTTP\\sampleapp};
+    \node[box, right=of sampleapp] (proxy) {Optional\\Proxy};
+    \node[box, right=of proxy] (tracker) {Tracker\\Discovery};
+    \node[box, below=2cm of sampleapp] (peerA) {Peer A\\PeerManager};
+    \node[box, below=2cm of tracker] (peerB) {Peer B\\PeerManager};
+
+    \draw[arrow] (browser) -- node[above]{HTTP} (sampleapp);
+    \draw[arrow] (sampleapp) -- node[above]{HTTP control} (proxy);
+    \draw[arrow] (proxy) -- node[above]{HTTP control} (tracker);
+    \draw[arrow, bend right=12] (sampleapp) to node[left]{local API} (peerA);
+    \draw[arrow, bend left=12] (peerA) to node[below]{TCP P2P frames} (peerB);
+    \draw[arrow, bend left=12] (peerB) to node[above]{TCP P2P frames} (peerA);
+
+    \begin{scope}[on background layer]
+        \node[plane, fit=(browser)(sampleapp)(proxy)(tracker), label={[align=center]above:Control plane}] {};
+        \node[plane, fit=(peerA)(peerB), label={[align=center]below:Data plane}] {};
+    \end{scope}
+\end{tikzpicture}
+}
+\caption{Kiến trúc tổng quan và phân tách control plane/data plane}
+\end{figure}
