@@ -15,38 +15,11 @@ Credential người dùng được nạp từ \texttt{db/users.json} và cache t
 \subsection{Luồng xác thực hoàn chỉnh}
 Hình dung luồng xử lý end-to-end của hệ thống như sau:
 
-\begin{lstlisting}[style=engineering,caption={Luồng xác thực đầy đủ của HTTP server}]
-Client                    HTTP Server / Middleware              Auth store
-  |                               |                                |
-  | POST /login + JSON creds      |                                |
-  |------------------------------>|                                |
-  |                               | parse method, headers, body    |
-  |                               |------------------------------->|
-  |                               | validate username/password     |
-  |                               |<-------------------------------|
-  |                               | create session + set cookie    |
-  |<------------------------------|                                |
-  | 200 OK + Set-Cookie           |                                |
-  |                               |                                |
-  | GET /api/self + Cookie        |                                |
-  |------------------------------>|                                |
-  |                               | verify session                 |
-  |                               |------------------------------->|
-  |                               |<-------------------------------|
-  |<------------------------------|                                |
-  | 200 OK + protected resource   |                                |
-  |                               |                                |
-  | POST /logout + Cookie         |                                |
-  |------------------------------>|                                |
-  |                               | delete session + expire cookie |
-  |<------------------------------|                                |
-  | 200 OK + Set-Cookie Max-Age=0 |                                |
-  |                               |                                |
-  | GET /api/self (khong co auth) |                                |
-  |------------------------------>|                                |
-  |<------------------------------|                                |
-  | 401 + WWW-Authenticate        |                                |
-\end{lstlisting}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1\textwidth,height=0.5\textheight,keepaspectratio]{assets/images/FullAuthenticationMechanicFlow.png}
+    \caption{Full authentication mechanic flow}
+\end{figure}
 
 Luồng trên có thể diễn giải thành các bước cụ thể:
 \begin{enumerate}[leftmargin=2em]
@@ -131,8 +104,3 @@ Content-Type: application/json
 
 {"status":"error","error":"authentication_required"}
 \end{lstlisting}
-
-\subsection{Nhận xét về lựa chọn thiết kế}
-Giải pháp hiện tại có một số ưu điểm rõ ràng. Thứ nhất, nó bám sát đề bài khi hỗ trợ cả hai hướng là HTTP authentication và cookie-based session. Thứ hai, việc ưu tiên session cookie ở các request sau giúp giảm việc lặp lại credential nhạy cảm trên đường truyền. Thứ ba, việc hỗ trợ thêm Digest cho phép hệ thống minh họa cơ chế challenge-response đầy đủ hơn so với chỉ dùng Basic.
-
-Tuy nhiên, đây vẫn là implementation phục vụ mục đích học tập và demo cục bộ. Báo cáo nên nêu rõ rằng cookie hiện chưa dùng thuộc tính \texttt{Secure} vì hệ thống chạy trên HTTP thường thay vì HTTPS; do đó nếu triển khai thực tế thì cần bật HTTPS, bổ sung \texttt{Secure}, tăng cường chính sách hết hạn session và mở rộng cơ chế thu hồi session theo nhiều thiết bị hoặc toàn hệ thống nếu bài toán thực tế yêu cầu.
