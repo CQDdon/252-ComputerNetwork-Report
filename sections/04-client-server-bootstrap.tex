@@ -1,32 +1,122 @@
 \section{Client-server Bootstrap}
-Tracker là thành phần control plane chịu trách nhiệm bootstrap mạng peer. Tracker không chuyển tiếp live message; nhiệm vụ của nó là giúp peer biết ai đang online và có thể kết nối đến đâu.
 
-\subsection{Peer registration}
-Khi sampleapp khởi động PeerManager, peer gửi request đăng ký đến tracker với các thông tin:
+Trong hệ thống hiện tại, tracker được dùng như một thành phần \textit{bootstrap} ở control plane. Tracker không tham gia chuyển tiếp live message giữa các peer. Vai trò của nó là giúp mỗi \texttt{sampleapp} công bố endpoint của chính mình, khám phá các peer khác đang hoạt động, và đồng bộ một số metadata mức ứng dụng như channel membership.
+
+\subsection{Thông tin cấu hình khi khởi động peer}
+Entry point \texttt{start\_sampleapp.py} cho phép mỗi peer được khởi động với hai nhóm tham số khác nhau:
 \begin{itemize}[leftmargin=2em]
-    \item \texttt{peer\_id}: định danh logic của peer;
-    \item \texttt{host}: địa chỉ IP hoặc hostname mà peer lắng nghe;
-    \item \texttt{port}: TCP listen port của PeerManager;
-    \item \texttt{capabilities}: các tính năng hỗ trợ như chat, broadcast hoặc channel;
-    \item \texttt{last\_seen}: thời điểm tracker ghi nhận peer còn sống.
+    \item HTTP endpoint của \texttt{sampleapp}: \texttt{--server-ip}, \texttt{--server-port};
+    \item P2P endpoint của \texttt{PeerManager}: \texttt{--peer-id}, \texttt{--peer-host}, \texttt{--peer-port}.
 \end{itemize}
 
-Tracker lưu danh sách active peers trong bộ nhớ hoặc file trạng thái. Mỗi peer record có TTL để tránh giữ peer đã chết mãi mãi.
+Ngoài ra, nếu peer cần tham gia mạng theo cơ chế bootstrap/discovery của tracker thì tiến trình được cấu hình thêm:
+\begin{itemize}[leftmargin=2em]
+    \item \texttt{--tracker-host};
+    \item \texttt{--tracker-port}.
+\end{itemize}
 
-\subsection{Heartbeat}
-Peer gửi heartbeat định kỳ để gia hạn trạng thái online. Nếu tracker không nhận heartbeat trong một khoảng thời gian cấu hình trước, tracker đánh dấu peer là expired và loại khỏi kết quả discovery.
+Hai tham số này không bắt buộc cho mọi trường hợp chạy. Nếu một peer hoạt động độc lập, hoặc nếu endpoint P2P của peer đích đã được biết trước và được nhập thủ công vào \texttt{/connect-peer}, peer đó vẫn có thể mở kết nối trực tiếp mà không cần tracker. Tuy nhiên, trong mô hình hệ thống mà báo cáo này mô tả, tracker là cơ chế bootstrap chuẩn để các peer tự công bố endpoint, khám phá nhau, và hình thành mạng ban đầu.
 
-Heartbeat không cần chứa message chat. Nó chỉ là tín hiệu control plane cho biết peer vẫn đang lắng nghe và sẵn sàng kết nối.
+Các giá trị này được truyền vào \texttt{create\_sampleapp()} và lưu trong \texttt{APP\_CONFIG}. Ngay sau đó, \texttt{PeerManager} được khởi tạo và start listener TCP cục bộ. Điều này có nghĩa là peer phải sẵn sàng nhận kết nối P2P trước khi công bố thông tin của mình cho tracker.
 
-\subsection{Discovery}
-Khi peer A muốn kết nối peer B, sampleapp gọi tracker để lấy danh sách peer hoặc tra cứu theo \texttt{peer\_id}. Tracker trả về endpoint của peer B, ví dụ \texttt{127.0.0.1:9002}. Sau đó peer A mở kết nối TCP trực tiếp đến peer B.
+\subsection{Đăng ký peer với tracker}
+Nếu \texttt{tracker\_host} và \texttt{tracker\_port} được cấu hình, \texttt{create\_sampleapp()} sẽ gọi \texttt{\_register\_with\_tracker()} ngay trong giai đoạn khởi tạo. Hàm này lấy thông tin cục bộ từ \texttt{\_manager\_self()} rồi gửi HTTP request \texttt{POST /register} đến tracker với payload:
+\begin{itemize}[leftmargin=2em]
+    \item \texttt{peer\_id};
+    \item \texttt{p2p\_host};
+    \item \texttt{p2p\_port};
+    \item \texttt{http\_host};
+    \item \texttt{http\_port}.
+\end{itemize}
 
-Luồng bootstrap:
+Ở phía tracker, endpoint \texttt{/register} chuẩn hóa dữ liệu và gọi \texttt{TrackerRegistry.register\_peer()}. Bản ghi được lưu trong bộ nhớ với các trường chính:
+\begin{itemize}[leftmargin=2em]
+    \item định danh logic của peer;
+    \item địa chỉ P2P để peer khác kết nối trực tiếp;
+    \item địa chỉ HTTP để UI hoặc peer khác gọi API nếu cần;
+    \item \texttt{last\_seen} để ghi lại thời điểm tracker nhận được lần cập nhật gần nhất từ peer đó.
+\end{itemize}
+
+Điểm quan trọng là tracker lưu cả endpoint HTTP lẫn endpoint P2P, nhưng discovery để thiết lập kết nối live sau đó luôn dựa trên \texttt{p2p\_host:p2p\_port}, không dựa trên HTTP server.
+
+\subsection{Đồng bộ nền và heartbeat kiểu register lặp lại}
+Sau lần đăng ký đầu tiên, \texttt{sampleapp} tạo một background thread để đồng bộ với tracker theo chu kỳ. Trong phần cài đặt hiện tại, luồng này chạy mỗi 10 giây và thực hiện đăng ký lại peer lên tracker.
+
+Về bản chất, đây là cơ chế heartbeat của hệ thống hiện tại, dù nó được thực hiện bằng cách đăng ký lại định kỳ thay vì gọi riêng endpoint \texttt{/heartbeat}. Cách làm này vẫn phù hợp với cài đặt của tracker, vì mỗi lần \texttt{register\_peer()} đều cập nhật lại \texttt{last\_seen}. Có thể hiểu \texttt{last\_seen} là ``mốc thời gian tracker nghe thấy peer này lần cuối'' ở control plane.
+
+Ở phía tracker, hàm \texttt{list\_active\_peers()} chỉ trả về các peer có \texttt{last\_seen} còn nằm trong cửa sổ TTL 30 giây. Nói cách khác, tracker so sánh thời gian hiện tại với \texttt{last\_seen}; nếu khoảng cách vượt TTL thì peer đó bị xem là không còn tồn tại trong registry và sẽ bị loại khỏi danh sách discovery. Điều này chỉ phản ánh việc tracker còn nhận được cập nhật từ peer hay không, chứ không trực tiếp kiểm tra socket P2P đang mở hay message data plane còn truyền được hay không. Do đó:
+\begin{itemize}[leftmargin=2em]
+    \item peer đang sống sẽ tiếp tục xuất hiện trong danh sách active peers;
+    \item peer bị tắt hoặc mất kết nối lâu sẽ biến mất khỏi danh sách mà không cần cleanup thủ công từ bên ngoài.
+\end{itemize}
+
+\subsection{Discovery qua tracker}
+Ở phía ứng dụng, discovery được thực hiện bởi \texttt{\_fetch\_tracker\_peers\_with\_status()}. Hàm này gửi \texttt{POST /peers} đến tracker, kèm theo \texttt{peer\_id} của chính requester. Tracker sau đó gọi \texttt{list\_active\_peers(exclude\_peer\_id=requester\_id)} để trả về danh sách peer đang hoạt động, trừ chính peer đang hỏi.
+
+Kết quả trả về được phía \texttt{sampleapp} chuẩn hóa lại bằng \texttt{\_normalize\_peer()} trước khi đưa lên UI hoặc dùng cho logic kết nối. Endpoint HTTP mà browser gọi là \texttt{/api/peers}. Endpoint này không chỉ trả danh sách peer mà còn đính kèmF
+\begin{itemize}[leftmargin=2em]
+    \item \texttt{tracker\_available}: tracker có phản hồi hay không;
+    \item \texttt{tracker\_error}: lỗi mô tả nếu tracker không sẵn sàng.
+\end{itemize}
+
+Thiết kế này cho phép giao diện người dùng biết rõ bootstrap service đang hoạt động hay đã bị gián đoạn, thay vì chỉ nhận một danh sách rỗng mơ hồ.
+
+\subsection{Từ discovery sang kết nối P2P trực tiếp}
+Tracker chỉ cung cấp dữ liệu bootstrap; việc mở kết nối thật sự diễn ra ở peer. Khi người dùng chọn kết nối đến một peer khác, browser gọi \texttt{POST /connect-peer} trên \texttt{sampleapp} cục bộ, kèm:
+\begin{itemize}[leftmargin=2em]
+    \item \texttt{target\_peer\_id};
+    \item \texttt{host};
+    \item \texttt{port}.
+\end{itemize}
+
+Endpoint này kiểm tra input, rồi gọi \texttt{PEER\_MANAGER.connect\_peer(target\_peer\_id, host, port)}. Nếu handshake hoàn tất thành công, phản hồi trả về cho client có các cờ:
+\begin{itemize}[leftmargin=2em]
+    \item \texttt{tcp\_connected};
+    \item \texttt{handshake\_complete};
+    \item \texttt{active}.
+\end{itemize}
+
+Như vậy, tracker không tự đẩy peer này sang peer kia. Tracker chỉ trả metadata; việc thiết lập TCP socket, gửi \texttt{hello}, và chuyển sang trạng thái \texttt{active} đều do hai \texttt{PeerManager} xử lý trực tiếp.
+
+\subsection{Luồng bootstrap hoàn chỉnh}
+Luồng khởi tạo và thiết lập kết nối của một peer có thể tóm tắt thành các bước sau:
 \begin{enumerate}[leftmargin=2em]
-    \item Peer A và Peer B register lên tracker.
-    \item Hai peer gửi heartbeat định kỳ.
-    \item Peer A request discovery từ tracker.
-    \item Tracker trả endpoint của Peer B.
-    \item Peer A thiết lập TCP P2P đến Peer B.
-    \item Tin nhắn live đi trực tiếp qua kết nối P2P.
+    \item người dùng khởi động \texttt{sampleapp} với HTTP endpoint, P2P endpoint, và tùy chọn tracker endpoint;
+    \item \texttt{PeerManager} start listener TCP tại \texttt{peer\_host:peer\_port};
+    \item \texttt{sampleapp} đăng ký bản thân với tracker bằng \texttt{/register};
+    \item background sync tiếp tục đăng ký lại theo chu kỳ để làm mới \texttt{last\_seen};
+    \item browser gọi \texttt{/api/peers} để lấy danh sách peer active từ tracker;
+    \item browser gọi \texttt{/connect-peer} đến \texttt{sampleapp} cục bộ;
+    \item \texttt{sampleapp} yêu cầu \texttt{PeerManager} mở TCP connection trực tiếp đến peer đích;
+    \item sau khi handshake \texttt{hello} hoàn tất, kết nối P2P trở thành \texttt{active} và sẵn sàng gửi \texttt{chat} hoặc \texttt{broadcast}.
 \end{enumerate}
+
+\subsection{Tracker không nằm trên đường dữ liệu}
+Một tính chất quan trọng của thiết kế này là tracker chỉ tham gia ở giai đoạn bootstrap và discovery. Khi hai peer đã kết nối thành công, live message đi thẳng giữa hai \texttt{PeerManager}. Điều này được phản ánh cả trong code lẫn test:
+\begin{itemize}[leftmargin=2em]
+    \item \texttt{/send-peer} và \texttt{/broadcast-peer} chỉ gọi vào \texttt{PEER\_MANAGER};
+    \item test tích hợp kiểm tra rằng sau khi tracker bị dừng, các kết nối P2P đang active vẫn còn tồn tại;
+    \item direct send sau khi tracker down vẫn có thể quan sát được trong UI state nếu kết nối P2P đã được thiết lập từ trước.
+\end{itemize}
+
+Nói cách khác, tracker là điểm vào mạng, không phải nút relay cho traffic trực tiếp.
+
+\subsection{Shutdown và unregister}
+Khi \texttt{sampleapp} dừng, hàm \texttt{shutdown\_sampleapp()} trước hết dừng background sync, sau đó gọi \texttt{\_unregister\_from\_tracker(reason)} để xóa peer khỏi registry. Chỉ sau bước này hệ thống mới tiếp tục dừng DHT overlay và shutdown \texttt{PeerManager}.
+
+Thứ tự shutdown này giúp tracker phản ánh nhanh hơn trạng thái thực của mạng:
+\begin{itemize}[leftmargin=2em]
+    \item nếu peer tắt bình thường, tracker xóa peer ngay thông qua \texttt{/unregister};
+    \item nếu peer chết đột ngột, tracker vẫn có thể loại peer sau TTL dựa trên \texttt{last\_seen}.
+\end{itemize}
+
+\subsection{Kết luận}
+Phần client-server bootstrap của hệ thống là một control-plane service tương đối mỏng nhưng đủ chức năng:
+\begin{itemize}[leftmargin=2em]
+    \item peer tự công bố endpoint của mình lên tracker;
+    \item tracker duy trì active peer registry bằng \texttt{last\_seen};
+    \item browser và \texttt{sampleapp} dùng tracker để discovery;
+    \item kết nối và truyền dữ liệu thực tế vẫn đi trực tiếp qua TCP P2P.
+\end{itemize}
+
+Thiết kế này giữ cho bootstrap đơn giản, đồng thời tránh biến tracker thành bottleneck hoặc single relay trên data plane.

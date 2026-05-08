@@ -1,39 +1,164 @@
 \section{Non-blocking I/O Mechanism}
-\subsection{Blocking và non-blocking socket}
-Với blocking socket, lời gọi \texttt{accept()}, \texttt{recv()} hoặc \texttt{send()} có thể giữ luồng thực thi cho đến khi có kết nối, có dữ liệu hoặc buffer hệ điều hành sẵn sàng. Cách này đơn giản nhưng dễ làm một peer bị treo nếu một kết nối chậm hoặc không phản hồi.
 
-Với non-blocking socket, socket trả về ngay cả khi thao tác chưa thể hoàn tất. Chương trình không chờ bị động trên từng socket, mà dùng selector để biết socket nào đã sẵn sàng đọc hoặc ghi. Nhờ vậy một event loop có thể quản lý nhiều kết nối đồng thời mà không cần tạo một thread cho mỗi peer.
-
-\subsection{Selector event loop}
-Selector theo dõi tập socket đã đăng ký và báo readiness:
+\subsection{Vì sao không dùng blocking I/O}
+Nếu dùng blocking socket, các lời gọi như \texttt{accept()}, \texttt{recv()} hoặc \texttt{send()} sẽ giữ luồng thực thi cho đến khi thao tác hoàn tất. Cách này đơn giản, nhưng không phù hợp với một peer phải đồng thời:
 \begin{itemize}[leftmargin=2em]
-    \item \textbf{Read readiness:} listener sẵn sàng \texttt{accept()}, hoặc socket kết nối đã có byte để đọc.
-    \item \textbf{Write readiness:} socket có thể gửi thêm byte từ outbound queue.
-    \item \textbf{Timeout:} event loop có thể dùng timeout để kiểm tra handshake deadline, ping interval và cleanup peer lỗi.
+    \item lắng nghe kết nối mới;
+    \item hoàn tất handshake với nhiều peer;
+    \item nhận và gửi frame cho các kết nối đang hoạt động;
+    \item kiểm tra timeout và heartbeat theo chu kỳ.
 \end{itemize}
 
-Readiness không có nghĩa là toàn bộ message đã có sẵn hoặc toàn bộ payload có thể gửi một lần. Vì vậy implementation phải xử lý partial \texttt{recv()} và partial \texttt{send()}.
+Với blocking I/O, chỉ một socket chậm hoặc một peer ngừng phản hồi cũng có thể làm toàn bộ tiến trình bị chặn. Vì vậy, phần transport P2P của hệ thống được xây dựng theo mô hình \textit{selectors-based non-blocking event loop}, trong đó một luồng duy nhất quản lý nhiều socket đồng thời mà không cần tạo một thread riêng cho mỗi kết nối.
 
-\subsection{Partial send/recv và frame buffer}
-TCP là byte stream, không giữ ranh giới message. Một lần \texttt{recv()} có thể nhận nửa frame, đúng một frame hoặc nhiều frame liền nhau. Do đó mỗi connection cần một receive buffer:
+\subsection{Cấu trúc runtime trong PeerManager}
+Trong mã nguồn \texttt{daemon/peermanager.py}, mỗi kết nối TCP được biểu diễn bởi một \texttt{PeerConnectionState}. Đối tượng này lưu toàn bộ trạng thái runtime cần thiết cho non-blocking I/O:
+\begin{itemize}[leftmargin=2em]
+    \item \texttt{sock} và \texttt{addr}: socket TCP và địa chỉ remote;
+    \item \texttt{peer\_id}: định danh peer, có thể chỉ được bind sau khi nhận \texttt{hello};
+    \item \texttt{recv\_buffer}: bộ đệm byte nhận vào;
+    \item \texttt{send\_buffer}: bộ đệm byte chờ gửi ra;
+    \item \texttt{state}: trạng thái kết nối, gồm \texttt{connecting}, \texttt{hello\_pending}, \texttt{active}, \texttt{closing}, \texttt{closed};
+    \item \texttt{last\_seen}, \texttt{last\_ping}, \texttt{last\_pong}: mốc thời gian phục vụ timeout và heartbeat;
+    \item \texttt{pending\_pings}: dùng để tính RTT khi nhận \texttt{pong};
+    \item \texttt{close\_after\_flush}: cho phép đóng kết nối một cách graceful sau khi gửi hết dữ liệu trong \texttt{send\_buffer}.
+\end{itemize}
+
+Ở mức toàn cục, \texttt{PeerManager} khởi tạo:
+\begin{itemize}[leftmargin=2em]
+    \item một \texttt{selectors.DefaultSelector()};
+    \item một listener TCP non-blocking;
+    \item một \texttt{command\_queue} để gửi lệnh từ luồng API vào event loop;
+    \item một cặp socket \texttt{socketpair()} dùng làm cơ chế đánh thức selector;
+    \item hai bảng trạng thái là \texttt{socket\_states} và \texttt{peer\_connections}.
+\end{itemize}
+
+\subsection{Listener non-blocking và cơ chế wakeup}
+Khi \texttt{PeerManager.start()} được gọi, listener socket được bind, \texttt{listen(50)}, rồi chuyển sang non-blocking bằng \texttt{setblocking(False)}. Sau đó listener được đăng ký với selector ở chế độ \texttt{EVENT\_READ}. Điều này có nghĩa là event loop chỉ gọi \texttt{accept()} khi hệ điều hành báo rằng listener đã sẵn sàng nhận kết nối mới.
+
+Một chi tiết quan trọng trong cài đặt là cặp socket \texttt{\_wake\_read} / \texttt{\_wake\_write}. Vì các API như \texttt{connect\_peer()} hoặc \texttt{disconnect\_peer()} có thể được gọi từ luồng khác với event loop, hệ thống không thao tác trực tiếp lên selector tại chỗ. Thay vào đó:
 \begin{enumerate}[leftmargin=2em]
-    \item đọc byte mới và append vào buffer;
-    \item nếu buffer chưa đủ 4 byte length prefix thì chờ thêm;
-    \item đọc độ dài frame từ 4 byte đầu;
-    \item nếu buffer chưa đủ payload JSON thì chờ thêm;
-    \item khi đủ frame, parse JSON và dispatch message type;
-    \item giữ lại byte dư cho frame kế tiếp.
+    \item API đẩy một lệnh vào \texttt{command\_queue};
+    \item \texttt{\_wake\_write.send(b"x")} ghi một byte vào socket wakeup;
+    \item selector đang chờ trong \texttt{select(timeout=1.0)} sẽ thức dậy vì \texttt{\_wake\_read} có dữ liệu;
+    \item event loop gọi \texttt{\_drain\_wakeup()} để đọc hết byte đánh thức;
+    \item sau đó \texttt{\_process\_commands()} mới thực hiện các thao tác \texttt{register}, \texttt{modify} hoặc \texttt{close}.
 \end{enumerate}
 
-Tương tự, \texttt{send()} có thể chỉ gửi được một phần payload. Mỗi connection cần outbound queue chứa các buffer chưa gửi xong. Khi selector báo writable, PeerManager tiếp tục gửi phần còn lại.
+Cách làm này tránh việc nhiều luồng cùng sửa selector trực tiếp, đồng thời vẫn giữ được mô hình một event loop trung tâm.
 
-\subsection{Gắn với PeerManager}
-PeerManager dùng non-blocking I/O theo các nguyên tắc:
+\subsection{Vòng lặp selector}
+Hàm \texttt{\_run\_loop()} là trung tâm của cơ chế non-blocking I/O. Mỗi vòng lặp gồm ba bước:
+\begin{enumerate}[leftmargin=2em]
+    \item xử lý các lệnh đang chờ trong \texttt{command\_queue};
+    \item gọi \texttt{selector.select(timeout=1.0)} để lấy danh sách socket sẵn sàng đọc hoặc ghi;
+    \item sau khi xử lý I/O xong, chạy \texttt{\_timeout\_tick()} để kiểm tra handshake timeout, peer timeout và heartbeat.
+\end{enumerate}
+
+Selector chỉ trả về \textit{readiness} thay vì message hoàn chỉnh. Vì vậy event loop phải tự quyết định nên đọc bao nhiêu, ghi bao nhiêu, và khi nào cần tiếp tục theo dõi \texttt{EVENT\_WRITE}.
+
+\subsection{Luồng kết nối outgoing}
+Khi một peer chủ động kết nối đến peer khác, \texttt{connect\_peer()} tạo socket non-blocking và gọi \texttt{connect\_ex()} thay vì \texttt{connect()}. Với non-blocking socket, thao tác này thường chưa hoàn tất ngay, nên trạng thái ban đầu của kết nối là \texttt{connecting}.
+
+Socket mới sau đó được đăng ký với selector ở cả hai hướng \texttt{EVENT\_READ | EVENT\_WRITE}. Khi selector báo writable, \texttt{\_service\_connection()} kiểm tra \texttt{SO\_ERROR}:
 \begin{itemize}[leftmargin=2em]
-    \item listener socket được đặt non-blocking và đăng ký read event;
-    \item socket sau \texttt{accept()} cũng được đặt non-blocking;
-    \item mỗi connection có frame buffer riêng cho inbound data;
-    \item mỗi connection có outbound queue riêng cho pending frames;
-    \item event loop xử lý read/write readiness, handshake timeout, heartbeat và cleanup;
-    \item mọi message gửi ra đều được encode thành frame trước khi đưa vào queue.
+    \item nếu có lỗi, kết nối thất bại;
+    \item nếu không có lỗi, TCP handshake đã hoàn tất.
 \end{itemize}
+
+Sau thời điểm đó:
+\begin{enumerate}[leftmargin=2em]
+    \item \texttt{tcp\_connected} được đặt thành \texttt{True};
+    \item trạng thái chuyển từ \texttt{connecting} sang \texttt{hello\_pending};
+    \item selector events được tính lại;
+    \item \texttt{\_send\_hello()} đưa frame \texttt{hello} vào \texttt{send\_buffer}.
+\end{enumerate}
+
+Kết nối chỉ được xem là sẵn sàng cho traffic bình thường khi peer kia gửi lại \texttt{hello} và trạng thái chuyển sang \texttt{active}.
+
+\subsection{Luồng kết nối incoming}
+Ở phía nhận, khi listener có \texttt{EVENT\_READ}, hàm \texttt{\_accept\_connection()} sẽ gọi \texttt{accept()}, đặt socket mới sang non-blocking, tạo \texttt{PeerConnectionState}, rồi đăng ký socket đó với selector ở chế độ \texttt{EVENT\_READ}.
+
+Với kết nối incoming, trạng thái ban đầu là \texttt{hello\_pending}. Peer này chưa được phép nhận \texttt{chat}, \texttt{broadcast}, \texttt{ack}, \texttt{ping} hoặc \texttt{pong}. Nếu đối tác gửi các loại message đó trước khi handshake hoàn tất, hàm \texttt{\_handle\_peer\_message()} sẽ xem đây là lỗi giao thức \texttt{handshake\_incomplete}.
+
+\subsection{Read readiness và receive buffer}
+Khi selector báo \texttt{EVENT\_READ}, event loop gọi \texttt{\_read\_from\_socket()}. Hàm này đọc một chunk bằng \texttt{recv(4096)} và nối vào \texttt{state.recv\_buffer}. Đây là điểm cốt lõi của non-blocking I/O: một lần \texttt{recv()} không tương ứng với một message.
+
+Mỗi message P2P được mã hóa theo dạng:
+\begin{center}
+\texttt{[4-byte big-endian length][UTF-8 JSON payload]}
+\end{center}
+
+Vì TCP là byte stream, các trường hợp sau đều có thể xảy ra:
+\begin{itemize}[leftmargin=2em]
+    \item chỉ nhận được một phần của length prefix;
+    \item nhận đủ một frame nhưng chưa hết frame kế tiếp;
+    \item nhận nhiều frame gộp trong cùng một lần \texttt{recv()}.
+\end{itemize}
+
+Hàm \texttt{decode\_peer\_messages()} xử lý chính xác tình huống này:
+\begin{enumerate}[leftmargin=2em]
+    \item nếu buffer chưa đủ 4 byte thì dừng;
+    \item đọc độ dài frame từ 4 byte đầu;
+    \item nếu độ dài vượt \texttt{MAX\_FRAME\_SIZE} thì báo lỗi \texttt{frame\_too\_large};
+    \item nếu buffer chưa đủ toàn bộ frame thì dừng và chờ lần \texttt{recv()} tiếp theo;
+    \item nếu đủ, cắt frame ra khỏi buffer, decode JSON, rồi tiếp tục kiểm tra xem còn frame nào nữa không.
+\end{enumerate}
+
+Nói cách khác, \texttt{recv\_buffer} giúp hệ thống giữ lại phần dữ liệu chưa hoàn chỉnh thay vì giả định rằng ranh giới message trùng với ranh giới lần đọc socket.
+
+\subsection{Write readiness và send buffer}
+Chiều gửi được xử lý đối xứng bằng \texttt{send\_buffer}. Khi một API như \texttt{send\_chat()}, \texttt{broadcast()} hoặc \texttt{send\_dht\_message()} muốn gửi dữ liệu, nó không gọi \texttt{send()} trực tiếp. Thay vào đó:
+\begin{enumerate}[leftmargin=2em]
+    \item message được kiểm tra điều kiện trạng thái;
+    \item message được encode thành frame bởi \texttt{encode\_peer\_message()};
+    \item bytes của frame được nối vào \texttt{state.send\_buffer};
+    \item \texttt{\_set\_selector\_events()} bật thêm \texttt{EVENT\_WRITE} cho socket đó.
+\end{enumerate}
+
+Điểm đáng chú ý là hệ thống không theo dõi \texttt{EVENT\_WRITE} liên tục cho mọi socket. Trong \texttt{\_set\_selector\_events()}, \texttt{EVENT\_WRITE} chỉ được bật nếu \texttt{send\_buffer} còn dữ liệu. Đây là tối ưu quan trọng vì đa số socket hầu như luôn writable; nếu luôn đăng ký write readiness, event loop sẽ bị đánh thức liên tục dù không có gì cần gửi.
+
+Khi selector báo writable, \texttt{\_flush\_send\_buffer()} gọi \texttt{send()} với toàn bộ phần còn lại trong buffer. Nếu kernel chỉ chấp nhận gửi một phần, số byte đã gửi sẽ bị xóa khỏi đầu buffer, còn phần chưa gửi giữ nguyên cho lần writable kế tiếp. Nếu buffer trống hẳn, \texttt{EVENT\_WRITE} sẽ được tắt lại.
+
+\subsection{Handshake, timeout và heartbeat}
+Triển khai hiện tại tách bạch hai loại timeout:
+\begin{itemize}[leftmargin=2em]
+    \item \textbf{Handshake timeout:} áp dụng khi kết nối ở trạng thái \texttt{hello\_pending}. Nếu quá \texttt{handshake\_timeout} mà chưa nhận \texttt{hello}, kết nối bị fail với lý do \texttt{handshake\_timeout}.
+    \item \textbf{Peer timeout:} áp dụng khi kết nối đã \texttt{active}. Nếu \texttt{last\_seen} quá cũ so với \texttt{peer\_timeout}, kết nối bị đóng với lý do \texttt{heartbeat\_timeout}.
+\end{itemize}
+
+Ngoài ra, \texttt{\_timeout\_tick()} còn gửi \texttt{ping} định kỳ mỗi \texttt{ping\_interval}. Khi nhận \texttt{pong}, hệ thống cập nhật \texttt{last\_pong} và tính \texttt{last\_rtt\_ms}. Như vậy, timeout không chỉ dựa trên việc socket có bị đóng hay không, mà còn dựa trên hoạt động thực tế của peer ở tầng giao thức.
+
+\subsection{Dispatch message sau khi decode}
+Sau khi tách được các frame hoàn chỉnh, \texttt{\_handle\_peer\_message()} sẽ:
+\begin{enumerate}[leftmargin=2em]
+    \item validate schema của message;
+    \item bind \texttt{peer\_id} nếu cần;
+    \item kiểm tra xem kết nối đã \texttt{active} chưa;
+    \item cập nhật \texttt{last\_seen};
+    \item dispatch theo \texttt{type}.
+\end{enumerate}
+
+Các loại message control plane như \texttt{hello}, \texttt{ping}, \texttt{pong}, \texttt{error}, \texttt{goodbye} và các loại message data plane như \texttt{chat}, \texttt{broadcast}, \texttt{ack} đều đi qua cùng một event loop. Điều này cho phép toàn bộ transport P2P giữ một mô hình thực thi nhất quán: đọc byte, tách frame, validate, rồi dispatch.
+
+\subsection{Graceful close và cleanup}
+Non-blocking I/O cũng ảnh hưởng đến cách đóng kết nối. Nếu cần ngắt kết nối graceful, \texttt{\_initiate\_disconnect()} sẽ queue một message \texttt{goodbye}, đặt cờ \texttt{close\_after\_flush = True}, rồi để event loop tiếp tục flush phần còn lại của \texttt{send\_buffer}. Chỉ khi buffer rỗng, \texttt{\_finalize\_close()} mới thực sự:
+\begin{itemize}[leftmargin=2em]
+    \item \texttt{unregister} socket khỏi selector;
+    \item xóa state khỏi các bảng theo dõi;
+    \item cập nhật các ACK đang pending thành \texttt{peer\_disconnected} nếu cần;
+    \item đóng socket và chuyển trạng thái sang \texttt{closed}.
+\end{itemize}
+
+Thiết kế này tránh việc mất dữ liệu đang chờ gửi khi đóng kết nối, đồng thời giữ cho việc cleanup luôn diễn ra trong một đường đi trạng thái rõ ràng.
+
+\subsection{Kết luận}
+Phần non-blocking I/O của hệ thống không chỉ là việc gọi \texttt{setblocking(False)} trên socket. Trong implementation hiện tại, nó là sự kết hợp của bốn cơ chế:
+\begin{itemize}[leftmargin=2em]
+    \item một selector event loop duy nhất;
+    \item state machine rõ ràng cho từng kết nối;
+    \item hai bộ đệm \texttt{recv\_buffer} và \texttt{send\_buffer} để xử lý partial I/O;
+    \item hệ timeout và heartbeat gắn trực tiếp với vòng lặp runtime.
+\end{itemize}
+
+Nhờ đó, \texttt{PeerManager} có thể quản lý nhiều peer đồng thời trong một luồng, vẫn xử lý đúng framing, handshake, ACK, timeout và shutdown, mà không cần dựa vào mô hình một thread cho mỗi kết nối.

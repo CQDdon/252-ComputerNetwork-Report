@@ -1,0 +1,32 @@
+@startuml p2p-connection-state-machine
+title P2P Connection State Machine
+
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam state {
+  BackgroundColor white
+  BorderColor black
+}
+
+[*] --> connecting : outgoing connect_ex()
+[*] --> hello_pending : incoming accept()
+
+connecting --> hello_pending : TCP connected
+connecting --> closing : connect_failed
+
+hello_pending --> active : hello received / validated
+hello_pending --> closing : handshake_timeout
+hello_pending --> closing : protocol_error
+
+active --> active : chat / broadcast / ack
+active --> active : ping / pong
+active --> closing : disconnect request
+active --> closing : goodbye received
+active --> closing : heartbeat_timeout
+active --> closing : peer_closed / recv_failed / send_failed
+
+closing --> closed : flush complete + finalize_close()
+closing --> closed : immediate close
+
+closed --> [*]
+@enduml

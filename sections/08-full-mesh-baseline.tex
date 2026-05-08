@@ -1,0 +1,28 @@
+\section{Full Mesh như một Baseline}
+
+Trước khi đi vào benchmark so sánh, cần nêu rõ rằng nhóm đã hiện thực một phương án \textit{full mesh broadcast} như một baseline để đối chiếu với DHT overlay. Ở mô hình này, mỗi peer duy trì kết nối trực tiếp đến các peer còn lại trong nhóm đang tham gia trao đổi. Khi một peer cần broadcast, bản tin có thể được gửi trực tiếp đến toàn bộ các peer đích mà không cần qua một lớp định tuyến trung gian.
+
+\subsection{Ý tưởng chính}
+Ưu điểm lớn nhất của full mesh là cấu trúc đơn giản. Vì mỗi peer đã có đường đi trực tiếp đến các peer khác, việc chuyển phát broadcast không cần thêm bước tra cứu owner, định tuyến theo ring, hay chuyển tiếp qua overlay. Ở quy mô nhỏ, cách tiếp cận này thường cho độ trễ tốt vì dữ liệu đi theo đường ngắn nhất giữa các peer.
+
+Về mặt triển khai, full mesh cũng là một baseline hợp lý vì:
+\begin{itemize}[leftmargin=2em]
+    \item logic broadcast trực tiếp, dễ kiểm chứng;
+    \item không phụ thuộc vào lớp định tuyến phân tán;
+    \item phù hợp để đối chiếu với DHT trong các benchmark về độ trễ và số lượng kết nối.
+\end{itemize}
+
+\subsection{Giới hạn của full mesh}
+Tuy nhiên, full mesh có một hạn chế cơ bản: số lượng kết nối tăng rất nhanh khi số peer tăng. Nếu có $n$ peer, số kết nối trực tiếp có xu hướng tăng theo bậc hai. Điều này làm chi phí duy trì socket, theo dõi trạng thái kết nối, và xử lý I/O tăng đáng kể khi hệ thống mở rộng.
+
+Ngoài chi phí kết nối, full mesh còn làm cho broadcast trở nên kém hiệu quả hơn về mặt tài nguyên ở quy mô lớn:
+\begin{itemize}[leftmargin=2em]
+    \item mỗi peer phải giữ nhiều kết nối đồng thời;
+    \item broadcast fan-out trực tiếp đến nhiều đích làm tăng chi phí gửi;
+    \item hệ thống khó mở rộng khi số peer hoặc số channel tăng.
+\end{itemize}
+
+\subsection{Lý do không chọn làm hướng chính}
+Vì các lý do trên, nhóm không chọn full mesh làm kiến trúc chính cho channeling. Mặc dù phương án này đơn giản và hữu ích như một baseline để so sánh, nó không phù hợp với mục tiêu giảm số kết nối trực tiếp và tiết kiệm tài nguyên khi số peer tăng. Thay vào đó, nhóm chọn DHT overlay để đưa phần định tuyến và fan-out sang một cấu trúc có khả năng mở rộng tốt hơn.
+
+Phần tiếp theo sẽ dùng benchmark để so sánh hai hướng tiếp cận này, không nhằm khẳng định một phương án luôn tốt hơn, mà để làm rõ trade-off giữa độ trễ chuyển phát trực tiếp của full mesh và khả năng mở rộng kết nối của DHT overlay.
