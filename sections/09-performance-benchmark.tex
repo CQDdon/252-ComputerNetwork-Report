@@ -45,35 +45,52 @@ Full mesh yêu cầu mỗi peer kết nối trực tiếp đến mọi peer còn
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=\textwidth]{assets/benchmark-plots/nodes_vs_connections.png}
+\includegraphics[width=\textwidth]{assets/benchmark_plots_json/nodes_vs_connections.png}
 \caption{Tổng số kết nối trực tiếp khi số node tăng. Full mesh tăng theo bậc hai, trong khi DHT overlay giữ số kết nối trực tiếp ở mức thấp hơn đáng kể.}
 \end{figure}
 
-\subsection{Đánh Đổi Về Độ Trễ}
-Ở quy mô nhỏ, full mesh thường có độ trễ p95 thấp hơn vì đường truyền là chuyển phát trực tiếp. Khi số node tăng, số lượng kết nối và chi phí quản lý socket của full mesh tăng mạnh, và DHT trở nên cạnh tranh (hoặc tốt hơn) về độ trễ đuôi trong một số cấu hình.
+\subsection{Chi Phí Hình Thành Topology}
+Chi phí của full mesh không chỉ nằm ở số lượng kết nối sau khi mạng đã ổn định, mà còn nằm ở thời gian cần thiết để dựng toàn bộ topology ban đầu. Vì mỗi cặp peer phải hoàn tất kết nối và handshake trực tiếp, thời gian hội tụ của full mesh tăng rõ rệt khi số node tăng. Trong khi đó, DHT overlay chỉ cần thiết lập một tập kết nối logic nhỏ hơn để bắt đầu hoạt động.
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=\textwidth]{assets/benchmark-plots/nodes_vs_p95_latency.png}
-\caption{Độ trễ đuôi (p95) theo số node. Full mesh có lợi thế chuyển phát trực tiếp ở quy mô nhỏ, còn DHT overlay chấp nhận thêm hop định tuyến để đổi lấy khả năng mở rộng kết nối.}
+\includegraphics[width=\textwidth]{assets/benchmark_plots_json/nodes_vs_convergence_seconds.png}
+\caption{Thời gian hội tụ topology theo số node. Full mesh cần nhiều thời gian hơn để dựng đủ các kết nối trực tiếp, trong khi DHT overlay hình thành mạng nhanh hơn nhờ số kết nối cần thiết ít hơn.}
+\end{figure}
+
+\subsection{Đánh Đổi Về Độ Trễ}
+Ở quy mô nhỏ, full mesh thường có lợi thế hoặc ít nhất là tương đương về độ trễ vì mỗi message đi trực tiếp từ sender đến receiver. Khi số node tăng, lợi thế này giảm dần vì chi phí quản lý nhiều kết nối bắt đầu bộc lộ, và độ trễ điển hình của hai chế độ trở nên gần nhau hơn.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{assets/benchmark_plots_json/nodes_vs_p50_latency.png}
+\caption{Độ trễ p50 theo số node. Ở quy mô nhỏ, full mesh thường có lợi thế nhờ đường đi trực tiếp; khi số node tăng, độ trễ điển hình của hai chế độ tiến gần nhau hơn.}
+\end{figure}
+
+Nếu p50 cho thấy độ trễ thường gặp, thì p95 phản ánh rõ hơn khả năng giữ ổn định khi hệ thống lớn dần. Ở đây, tail latency của full mesh xấu đi khi số node tăng vì mỗi peer phải duy trì và phục vụ quá nhiều kết nối đồng thời. DHT overlay chấp nhận thêm hop định tuyến, nhưng tránh được áp lực fan-out trực tiếp đến toàn bộ mạng.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{assets/benchmark_plots_json/nodes_vs_p95_latency.png}
+\caption{Độ trễ đuôi (p95) theo số node. Khi hệ thống lớn dần, tail latency của full mesh xấu đi do áp lực từ quá nhiều kết nối trực tiếp, còn DHT overlay đánh đổi thêm hop để giữ khả năng mở rộng tốt hơn.}
 \end{figure}
 
 \subsection{Độ Tin Cậy và Tính Đúng Đắn Khi Chuyển Phát}
-Các lần chạy benchmark đã hoàn tất cho thấy cả hai overlay đều đạt tính đúng đắn khi chuyển phát tốt. Trong các lần chạy đã hoàn thành, hai overlay đều giao đủ số bản tin kỳ vọng với \textbf{không có lỗi chuyển phát} và \textbf{không có bản sao (duplicate)}. Kết quả này bổ sung cho Mục 07: phần xử lý lỗi tập trung vào cơ chế ở mức giao thức/runtime, còn benchmark ở đây kiểm chứng rằng broadcast không tạo bản sao hoặc làm mất bản tin trong điều kiện test.
+Các lần chạy benchmark đã hoàn tất cho thấy cả hai overlay đều đạt tính đúng đắn khi chuyển phát. Trong các lần chạy hoàn chỉnh, hai chế độ đều giao đủ số bản tin kỳ vọng với \textbf{không có lỗi chuyển phát} và \textbf{không có bản sao}. Vì vậy, đồ thị này chủ yếu đóng vai trò xác nhận correctness, không phải điểm phân biệt chính giữa hai overlay.
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=\textwidth]{assets/benchmark-plots/nodes_vs_success_rate.png}
+\includegraphics[width=\textwidth]{assets/benchmark_plots_json/nodes_vs_success_rate.png}
 \caption{Tỷ lệ chuyển phát thành công theo số node. Các lần chạy đã hoàn tất cho thấy không mất bản tin và không có bản sao (duplicate).}
 \end{figure}
 
 \subsection{Quan Sát Về Bộ Nhớ}
-Bộ nhớ RSS quan sát được khá tương đồng giữa hai chế độ vì benchmark khởi tạo một tiến trình Python cho mỗi peer. Do đó, bộ nhớ chủ yếu bị chi phối bởi chi phí runtime theo tiến trình, không chỉ bởi số lượng socket/kết nối.
+Bộ nhớ RSS tổng thể của hai chế độ vẫn khá gần nhau vì benchmark khởi tạo một tiến trình Python riêng cho mỗi peer, nên chi phí theo process chi phối phần lớn kết quả. Tuy vậy, khi số node tăng, khoảng cách giữa hai đường vẫn dần mở ra. Điều này cho thấy số lượng kết nối và trạng thái socket nhiều hơn của full mesh vẫn để lại dấu vết trong tiêu thụ bộ nhớ, dù chưa đủ lớn để trở thành luận điểm chính.
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=\textwidth]{assets/benchmark-plots/nodes_vs_rss_mb_total.png}
-\caption{Tổng bộ nhớ RSS theo số node. Trong benchmark này, bộ nhớ chủ yếu bị chi phối bởi chi phí runtime theo tiến trình.}
+\includegraphics[width=\textwidth]{assets/benchmark_plots_json/nodes_vs_rss_mb_total.png}
+\caption{Tổng bộ nhớ RSS theo số node. Chi phí theo tiến trình vẫn chi phối kết quả, nhưng khoảng cách giữa hai chế độ tăng dần khi số node lớn hơn.}
 \end{figure}
 
 \subsection{Tóm Tắt}

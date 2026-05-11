@@ -1,33 +1,67 @@
-\section{Testing \& Failure Handling}
-Kiểm thử tập trung vào protocol P2P, cơ chế non-blocking I/O và hành vi khi có lỗi. Các test đã passed chứng minh hệ thống xử lý được cả luồng bình thường và các tình huống biên.
+\section{Testing}
+Phần kiểm thử của dự án không chỉ dừng ở các ca thử thủ công, mà đã được hiện thực thành một test suite bao phủ từ peer protocol mức thấp cho đến các luồng integration giữa tracker, sampleapp, PeerManager và DHT overlay. Trong báo cáo này, phần kiểm thử được dùng để chứng minh những hành vi bên ngoài nào đã được xác nhận, thay vì đi sâu vào các chi tiết xử lý lỗi nội bộ theo kiểu white-box.
 
-\subsection{Test cases}
-\begin{longtable}{|p{4cm}|p{9cm}|}
-\hline
-\textbf{Test case} & \textbf{Kết quả mong đợi} \\
-\hline
-Send before connect & PeerManager từ chối gửi, trả lỗi rõ ràng hoặc queue theo chính sách cấu hình; không crash. \\
-\hline
-Malformed message & Receiver phát hiện JSON sai hoặc thiếu field bắt buộc, gửi \texttt{error} và có thể đóng connection. \\
-\hline
-Handshake timeout & Connection ở \texttt{hello\_pending} quá thời hạn sẽ bị đóng và cleanup khỏi selector. \\
-\hline
-Peer failure cleanup & Khi peer đóng bất ngờ hoặc socket lỗi, PeerManager loại connection khỏi peer table và giải phóng buffer/queue. \\
-\hline
-Duplicate connect & Nếu hai peer mở kết nối trùng nhau, hệ thống giữ một connection hợp lệ theo tie-break rule, ví dụ so sánh \texttt{peer\_id}. \\
-\hline
-Broadcast partial failure & Broadcast vẫn gửi đến các peer còn sống; peer lỗi được ghi nhận riêng, không làm hỏng toàn bộ thao tác. \\
-\hline
-\end{longtable}
+\subsection{Chiến lược kiểm thử}
+Các test được chia thành ba lớp chính.
+\begin{itemize}[leftmargin=2em]
+    \item Kiểm thử đơn vị cho peer protocol và DHT utilities để xác nhận framing, schema validation, phép tính hash, successor, predecessor, interval và finger table.
+    \item Kiểm thử runtime cho \texttt{PeerManager} và \texttt{DHTOverlay} để xác nhận event loop non-blocking, handshake, routing, duplicate suppression và fan-out.
+    \item Kiểm thử integration qua HTTP endpoint và UI flow để bảo đảm các thành phần khi ghép lại vẫn giữ đúng semantics thiết kế, đặc biệt ở các luồng bootstrap, direct chat và DHT channel.
+\end{itemize}
 
-\subsection{Failure handling}
-\textbf{Malformed frame:} nếu length prefix quá lớn, âm theo parse lỗi, hoặc payload không phải JSON hợp lệ, receiver gửi \texttt{error} rồi đóng kết nối để bảo vệ event loop.
+\subsection{Kiểm thử peer protocol và non-blocking runtime}
+Nhóm test trong \texttt{test\_peer\_protocol.py} xác nhận các bất biến quan trọng của tầng truyền thông P2P.
 
-\textbf{Partial send failure:} nếu socket lỗi khi outbound queue còn dữ liệu, message liên quan được đánh dấu failed. Các message đã ack trước đó vẫn giữ trạng thái delivered.
+Thứ nhất, phần framing đã được kiểm chứng với các tình huống đọc dở khung và nhiều message đến trong cùng một lần \texttt{recv()}. Các test \texttt{test\_partial\_receive\_parsing()} và \texttt{test\_multiple\_messages\_in\_one\_recv()} cho thấy bộ đệm chỉ giải mã khi đã đủ dữ liệu, đồng thời không làm mất message khi hai frame đi liền nhau.
 
-\textbf{Handshake failure:} nếu peer không gửi \texttt{hello}, gửi sai version hoặc trùng \texttt{peer\_id} bất thường, connection không được chuyển sang active.
+Thứ hai, phần validation được kiểm tra với các trường hợp lỗi đặc trưng: JSON sai định dạng, frame vượt quá \texttt{MAX\_FRAME\_SIZE}, thiếu trường bắt buộc, và schema cho các message loại \texttt{hello}, \texttt{error}, \texttt{goodbye}, \texttt{dht\_route}. Điều này quan trọng vì toàn bộ event loop của PeerManager dựa trên giả định rằng message chỉ được đưa vào runtime khi đã qua bước kiểm tra schema.
 
-\textbf{Heartbeat và ping/pong:} trong data plane, \texttt{ping}/\texttt{pong} giúp phát hiện kết nối chết nhưng chưa đóng rõ ràng. Nếu quá nhiều lần ping timeout, PeerManager cleanup socket và thông báo lên sampleapp.
+Thứ ba, phần runtime xác nhận rằng các endpoint và trạng thái quan sát được từ ứng dụng phù hợp với thiết kế. Các test đã kiểm chứng các tình huống:
+\begin{itemize}[leftmargin=2em]
+    \item nhận message sai schema thì phía nhận trả \texttt{error} thay vì \texttt{ack};
+    \item gọi endpoint disconnect thì kết nối biến mất khỏi peer table ở cả hai đầu;
+    \item shutdown graceful gửi \texttt{goodbye} đến toàn bộ peer đang active và kết thúc được tiến trình đóng ứng dụng.
+\end{itemize}
+
+\subsection{Kiểm thử DHT overlay và channel routing}
+Hai file \texttt{test\_dht\_overlay.py} và \texttt{test\_dht\_channel.py} tập trung vào hành vi định tuyến và truyền message qua channel.
+
+Ở mức overlay cơ bản, test suite xác nhận rằng một node đơn lẻ tự tạo được single-node ring, việc \texttt{join\_ring()} đặt đúng successor, finger table được tính theo điểm bắt đầu \texttt{node\_id + 2\textasciicircum i}, và việc chọn next hop ưu tiên \texttt{closest\_preceding\_finger()}. Ngoài ra, \texttt{refresh\_known\_nodes()} được kiểm tra để bảo đảm snapshot cũ bị thay thế, qua đó owner có thể được tính lại đúng khi một node stale biến mất khỏi discovery.
+
+Ở mức hành vi định tuyến, các test đã xác nhận ba cơ chế quan trọng.
+\begin{itemize}[leftmargin=2em]
+    \item \texttt{TTL}: nếu route đi với \texttt{ttl = 0} thì message không còn được chuyển tiếp.
+    \item Duplicate suppression: cùng một \texttt{message\_id} sẽ không bị forward hay deliver lặp lại.
+    \item Khi topo thay đổi, owner và trạng thái vòng được tính lại từ snapshot discovery mới.
+\end{itemize}
+
+Đối với channeling, test suite kiểm tra toàn bộ đường đi của message:
+\begin{itemize}[leftmargin=2em]
+    \item \texttt{channel\_key} là deterministic và luôn nằm trong miền \texttt{0 .. 2\textasciicircum m - 1};
+    \item owner của channel được chọn đúng cả trong trường hợp wrap-around;
+    \item nếu owner là local node thì join được xử lý cục bộ, còn nếu owner ở xa thì message được route qua overlay;
+    \item owner fan-out đến các member của channel nhưng bỏ qua sender ban đầu;
+    \item \texttt{dht\_channel\_deliver} đi đến \texttt{target\_peer\_id} cụ thể, không quay lại theo owner key;
+    \item owner mới có thể bootstrap lại membership từ payload của publish sau khi topo thay đổi.
+\end{itemize}
+
+Nhóm test này cũng chứng minh rằng việc gửi channel message không tự động refresh discovery mỗi lần gửi. Điều này cho thấy overlay dùng trạng thái DHT hiện có để truyền dữ liệu, thay vì biến mỗi lần send thành một chu kỳ bootstrap mới.
+
+\subsection{Kiểm thử integration ở mức ứng dụng}
+File \texttt{test\_dht\_app\_integration.py} xác nhận rằng các endpoint HTTP và logic ứng dụng vẫn đúng khi chạy thành tiến trình thật.
+
+Các test ở đây bao phủ cả luồng thành công lẫn luồng lỗi. Ví dụ:
+\begin{itemize}[leftmargin=2em]
+    \item khi DHT bị tắt, endpoint trạng thái trả \texttt{dht\_not\_enabled} nhưng direct chat API vẫn giữ hành vi an toàn;
+    \item refresh nodes từ tracker trả về đúng \texttt{node\_id} và địa chỉ P2P;
+    \item join ring với bootstrap không kéo hệ thống về full mesh, mà chỉ hình thành kết nối cần thiết;
+    \item tạo channel trùng tên bị từ chối với \texttt{channel\_already\_exists};
+    \item join channel không tồn tại trả \texttt{channel\_not\_found};
+    \item gửi channel message trước khi join bị từ chối với \texttt{not\_channel\_member};
+    \item membership của channel được nhìn thấy nhất quán giữa nhiều peer và không bị nhân đôi khi join lặp lại.
+\end{itemize}
+
+Một điểm quan trọng khác là quan hệ giữa tracker và data plane. Test suite xác nhận rằng sau khi đã bootstrap và thiết lập kết nối P2P, direct chat vẫn hoạt động độc lập với tracker. Điều này là bằng chứng thực nghiệm cho kiến trúc tách control plane và data plane đã mô tả ở các phần trước.
 
 \subsection{Kết luận kiểm thử}
-Các test passed cho thấy thiết kế tách control plane/data plane hoạt động đúng: tracker hỗ trợ bootstrap và discovery, còn live message đi qua TCP P2P. Non-blocking event loop giúp PeerManager xử lý nhiều socket mà vẫn kiểm soát được partial frame, outbound queue và cleanup khi lỗi.
+Từ các test đã có, có thể rút ra hai kết luận kỹ thuật chính. Thứ nhất, các giao diện bên ngoài của hệ thống, từ direct chat cho đến DHT channel, đều đã được kiểm chứng bằng test tự động thay vì chỉ dựa vào mô tả thiết kế. Thứ hai, khi nâng từ direct chat sang DHT-based channeling, hệ thống vẫn giữ được các tính chất quan trọng ở mức quan sát được: chọn owner đúng, membership nhất quán, route nhiều hop đúng đích, và tách biệt rõ giữa bootstrap với truyền message thời gian thực.

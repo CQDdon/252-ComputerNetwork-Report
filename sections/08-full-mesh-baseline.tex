@@ -1,28 +1,84 @@
-\section{Full Mesh như một Baseline}
+\section{Full Mesh as a Baseline}
+Trước khi chuyển sang so sánh với DHT overlay, cần tách riêng mô hình full mesh như một baseline đã được hiện thực thật trong hệ thống. Khác với DHT, full mesh không có lớp định tuyến logic, không có owner của channel, và cũng không có cơ chế route nhiều hop. Mọi việc được xây trên các kết nối P2P trực tiếp do \texttt{PeerManager} quản lý, còn ứng dụng chỉ gọi các endpoint như \texttt{/connect-peer}, \texttt{/send-peer} và \texttt{/broadcast-peer}.
 
-Trước khi đi vào benchmark so sánh, cần nêu rõ rằng nhóm đã hiện thực một phương án \textit{full mesh broadcast} như một baseline để đối chiếu với DHT overlay. Ở mô hình này, mỗi peer duy trì kết nối trực tiếp đến các peer còn lại trong nhóm đang tham gia trao đổi. Khi một peer cần broadcast, bản tin có thể được gửi trực tiếp đến toàn bộ các peer đích mà không cần qua một lớp định tuyến trung gian.
+\subsection{Mô hình kết nối}
+Trong full mesh, mục tiêu là để mỗi peer có kết nối TCP active đến mọi peer còn lại trong tập tham gia benchmark hoặc trao đổi dữ liệu. Nếu có $n$ peer, số cạnh logic cần có là
+\begin{center}
+\[
+E = \frac{n(n-1)}{2}
+\]
+\end{center}
 
-\subsection{Ý tưởng chính}
-Ưu điểm lớn nhất của full mesh là cấu trúc đơn giản. Vì mỗi peer đã có đường đi trực tiếp đến các peer khác, việc chuyển phát broadcast không cần thêm bước tra cứu owner, định tuyến theo ring, hay chuyển tiếp qua overlay. Ở quy mô nhỏ, cách tiếp cận này thường cho độ trễ tốt vì dữ liệu đi theo đường ngắn nhất giữa các peer.
+Tương ứng, số peer khác mà mỗi node phải giữ kết nối active là
+\begin{center}
+\[
+\deg(v) = n - 1
+\]
+\end{center}
 
-Về mặt triển khai, full mesh cũng là một baseline hợp lý vì:
+Đây chính là điều mà script benchmark thực hiện trong chế độ \texttt{fullmesh}: với mỗi cặp peer \((i, j)\), hệ thống gọi \texttt{/connect-peer} từ peer có định danh nhỏ hơn sang peer còn lại. Sau giai đoạn này, benchmark chỉ coi mô hình đã hội tụ khi mọi peer đều quan sát được ít nhất \(n-1\) peer active trong \texttt{/peer-status}.
+
+\subsection{Ánh xạ vào code}
+Về mặt hiện thực, full mesh không phải là một lớp riêng giống \texttt{DHTOverlay}. Nó là kết quả của ba thành phần đã có sẵn.
 \begin{itemize}[leftmargin=2em]
-    \item logic broadcast trực tiếp, dễ kiểm chứng;
-    \item không phụ thuộc vào lớp định tuyến phân tán;
-    \item phù hợp để đối chiếu với DHT trong các benchmark về độ trễ và số lượng kết nối.
+    \item Endpoint \texttt{/connect-peer} nhận định danh peer đích cùng địa chỉ P2P, rồi gọi PeerManager để mở kết nối non-blocking và chờ handshake hoàn tất.
+    \item Endpoint \texttt{/send-peer} gọi \texttt{PEER\_MANAGER.send\_chat(...)} để gửi một message trực tiếp đến đúng một peer đang active.
+    \item Endpoint \texttt{/broadcast-peer} gọi \texttt{PEER\_MANAGER.broadcast(...)} để fan-out cùng một nội dung đến toàn bộ peer hiện đang active trong bảng kết nối cục bộ.
 \end{itemize}
 
-\subsection{Giới hạn của full mesh}
-Tuy nhiên, full mesh có một hạn chế cơ bản: số lượng kết nối tăng rất nhanh khi số peer tăng. Nếu có $n$ peer, số kết nối trực tiếp có xu hướng tăng theo bậc hai. Điều này làm chi phí duy trì socket, theo dõi trạng thái kết nối, và xử lý I/O tăng đáng kể khi hệ thống mở rộng.
+Do đó, full mesh trong dự án này nên được hiểu là ``broadcast trên tập kết nối P2P trực tiếp đã được dựng sẵn'', chứ không phải một giao thức broadcast độc lập với PeerManager.
 
-Ngoài chi phí kết nối, full mesh còn làm cho broadcast trở nên kém hiệu quả hơn về mặt tài nguyên ở quy mô lớn:
+\subsection{Cơ chế broadcast trực tiếp}
+Hàm \texttt{PeerManager.broadcast()} lấy danh sách tất cả peer đang active, rồi lặp qua từng peer để:
+\begin{enumerate}[leftmargin=2em]
+    \item dựng một message loại \texttt{broadcast} cho peer đích;
+    \item ghi nhận trạng thái ACK ban đầu là \texttt{pending};
+    \item đưa message vào outbound queue của kết nối tương ứng.
+\end{enumerate}
+
+Nếu một peer gửi broadcast đến \(n-1\) peer còn lại, số bản tin outbound được tạo ra trong một lần gửi là
+\begin{center}
+\[
+M_{\text{out}} = n - 1
+\]
+\end{center}
+
+Khác với DHT overlay, không tồn tại pha ``route đến owner rồi fan-out''. Trong full mesh, sender chính là điểm phát tán trực tiếp. Vì vậy, độ dài đường đi của mỗi bản tin ở mức logic là
+\begin{center}
+\[
+\text{hop count} = 1
+\]
+\end{center}
+
+Đây là lý do full mesh thường có lợi thế về độ trễ ở quy mô nhỏ: dữ liệu không phải qua hop trung gian hay tra cứu định tuyến trước khi đến đích.
+
+\subsection{Các hành vi đã được kiểm chứng trong code}
+Các script và test hiện có cho thấy baseline full mesh không chỉ là giả thuyết, mà đã được vận hành và kiểm chứng ở mức ứng dụng.
+
+Trong \texttt{run\_peer\_demo.py}, hệ thống xác nhận các hành vi sau:
 \begin{itemize}[leftmargin=2em]
-    \item mỗi peer phải giữ nhiều kết nối đồng thời;
-    \item broadcast fan-out trực tiếp đến nhiều đích làm tăng chi phí gửi;
-    \item hệ thống khó mở rộng khi số peer hoặc số channel tăng.
+    \item gửi bằng \texttt{/send-peer} trước khi có kết nối thì bị từ chối với \texttt{peer\_not\_connected};
+    \item gọi \texttt{/broadcast-peer} khi chưa có peer active thì \texttt{queued\_count = 0};
+    \item gọi \texttt{/connect-peer} lặp lại đến cùng một đích sẽ tái sử dụng kết nối active hiện có;
+    \item broadcast sau khi một peer chết vẫn tiếp tục đến các peer còn sống.
 \end{itemize}
 
-\subsection{Lý do không chọn làm hướng chính}
-Vì các lý do trên, nhóm không chọn full mesh làm kiến trúc chính cho channeling. Mặc dù phương án này đơn giản và hữu ích như một baseline để so sánh, nó không phù hợp với mục tiêu giảm số kết nối trực tiếp và tiết kiệm tài nguyên khi số peer tăng. Thay vào đó, nhóm chọn DHT overlay để đưa phần định tuyến và fan-out sang một cấu trúc có khả năng mở rộng tốt hơn.
+Trong \texttt{benchmark\_overlay\_modes.py}, chế độ \texttt{fullmesh} được triển khai bằng cách dựng đầy đủ các cặp kết nối, đợi toàn bộ mạng hội tụ, rồi mới đo độ trễ và tỉ lệ nhận message qua \texttt{/broadcast-peer}. Điều này cho thấy phần benchmark ở Section sau thực sự so sánh hai mô hình đã được hiện thực, không phải so giữa DHT chạy thật với một baseline chỉ tồn tại trên lý thuyết.
 
-Phần tiếp theo sẽ dùng benchmark để so sánh hai hướng tiếp cận này, không nhằm khẳng định một phương án luôn tốt hơn, mà để làm rõ trade-off giữa độ trễ chuyển phát trực tiếp của full mesh và khả năng mở rộng kết nối của DHT overlay.
+\subsection{Giới hạn mở rộng}
+Ưu điểm chính của full mesh là đơn giản: không cần tra cứu owner, không cần route nhiều hop, và việc suy luận đường đi của message rất trực tiếp. Tuy nhiên, chi phí kết nối tăng theo bậc hai theo số node:
+\begin{center}
+\[
+E = \frac{n(n-1)}{2} = O(n^2)
+\]
+\end{center}
+
+Điều này kéo theo ba hệ quả thực tế.
+\begin{itemize}[leftmargin=2em]
+    \item Mỗi peer phải giữ ngày càng nhiều socket active khi \(n\) tăng.
+    \item Sender phải tự fan-out đến toàn bộ tập đích, nên chi phí gửi tăng tuyến tính theo số peer nhận trong từng lần broadcast.
+    \item Event loop của mỗi peer phải theo dõi nhiều kết nối đồng thời hơn, làm chi phí quản lý trạng thái và I/O tăng nhanh khi mạng lớn dần.
+\end{itemize}
+
+\subsection{Vai trò của baseline này}
+Vì các đặc điểm trên, nhóm không dùng full mesh làm kiến trúc chính cho channeling. Tuy nhiên, nó vẫn là một baseline cần thiết vì nó đại diện cho phương án trực tiếp nhất: dựng trước mọi kết nối, rồi broadcast thẳng đến các peer đang tham gia. Khi đặt cạnh DHT overlay, full mesh giúp làm rõ trade-off cốt lõi của dự án: đổi số hop và chi phí route để lấy khả năng giảm số kết nối trực tiếp và mở rộng tốt hơn khi số node tăng.

@@ -1,33 +1,130 @@
 \section{Channeling via DHT Overlay}
-Nhóm sử dụng DHT overlay như phương án chính cho channeling để broadcast tiết kiệm tài nguyên. Thay vì để một peer fan-out trực tiếp đến toàn bộ member list hoặc dựa vào tracker để relay, hệ thống định tuyến bản tin channel qua owner của channel trên một vòng định danh kiểu Chord. Owner chịu trách nhiệm fan-out đến các member hiện thời bằng transport PeerManager.
+Trong hệ thống này, DHT overlay là cơ chế chính để triển khai channeling. Mục tiêu của lớp này là giảm số kết nối trực tiếp cần duy trì khi số peer tăng, nhưng vẫn cho phép một channel được phân phối theo kiểu phi tập trung. Phần cài đặt nằm trong lớp \texttt{DHTOverlay}; lớp này chỉ quản lý trạng thái vòng định danh và quyết định định tuyến, còn việc gửi TCP thực tế vẫn do \texttt{PeerManager} đảm nhiệm.
 
-\subsection{Hash channel name thành key}
-Mỗi channel name được hash thành một key trong không gian định danh vòng, ví dụ:
+\subsection{Không gian định danh và chọn owner của channel}
+Trong Chord, không gian khóa có kích thước
 \begin{center}
-\texttt{key = hash("network-lab") mod} $2^m$
+\[
+\lvert \mathcal{K} \rvert = 2^m
+\]
 \end{center}
 
-Mỗi peer cũng có một key định danh. Owner của channel là successor của channel key trên vòng DHT, tức peer đầu tiên có id lớn hơn hoặc bằng key theo chiều vòng.
+Điều này có nghĩa là mọi \texttt{node\_id} và mọi khóa định tuyến đều được biểu diễn như một số nguyên $m$-bit, nên tự nhiên sẽ nằm trên vòng modulo $2^m$. Trong code hiện tại, mỗi peer được ánh xạ vào một \texttt{node\_id} bằng cách băm \texttt{peer\_id}, còn tên channel cũng được biến đổi thành khóa nguyên bằng hàm \texttt{compute\_channel\_key()}:
+\begin{center}
+\[
+\texttt{node\_id} = H(\texttt{peer\_id}) \bmod 2^m
+\]
+\[
+\texttt{channel\_key} = H(\texttt{channel\_name}) \bmod 2^m
+\]
+\end{center}
 
-\subsection{Route qua ring}
-Khi peer muốn join hoặc gửi message vào channel, peer không cần biết owner trực tiếp. Request có thể được route qua ring:
+Với một khóa bất kỳ $k$, successor được định nghĩa là node đầu tiên trên vòng có định danh không nhỏ hơn khóa đó:
+\begin{center}
+\[
+\operatorname{successor}(k)
+= \min \{ n \in \mathcal{N} \mid n.\texttt{node\_id} \ge k \}
+\]
+\end{center}
+
+Nếu không tồn tại node nào thỏa điều kiện trên, phép chọn sẽ wrap về node có \texttt{node\_id} nhỏ nhất trên vòng. Trong hệ thống này, owner của channel được tính trực tiếp từ quy tắc đó:
+\begin{center}
+\[
+\operatorname{owner}(\texttt{channel\_name})
+= \operatorname{successor}(H(\texttt{channel\_name}) \bmod 2^m)
+\]
+\end{center}
+
+Điều này được hiện thực qua \texttt{get\_channel\_owner()} và \texttt{find\_successor()}. Vì owner được tính từ khóa chứ không gắn cứng với peer tạo channel, nên \texttt{creator\_peer\_id} và \texttt{owner\_peer\_id} có thể khác nhau.
+
+\subsection{Trạng thái routing mà mỗi peer duy trì}
+Mỗi tiến trình peer giữ một bản sao trạng thái DHT cục bộ, gồm các thành phần quan trọng sau:
+\begin{itemize}[leftmargin=2em]
+    \item \texttt{known\_nodes}: tập peer mà node hiện tại biết được từ tracker hoặc từ các sự kiện runtime;
+    \item \texttt{successor} và \texttt{predecessor}: hai láng giềng logic của peer trên vòng;
+    \item \texttt{successor\_list}: danh sách một vài successor gần nhất để quan sát và hỗ trợ ổn định vòng;
+    \item \texttt{finger\_table}: bảng finger phục vụ việc chọn bước nhảy gần khóa đích hơn thay vì chỉ đi tuần tự theo vòng;
+    \item \texttt{owned\_channels}: các channel mà peer hiện tại đang là owner;
+    \item \texttt{channel\_members\_cache}: cache membership để phục vụ truy vấn và fan-out;
+    \item \texttt{route\_status} và \texttt{dht\_events}: nhật ký dùng để quan sát đường đi và kết quả xử lý message.
+\end{itemize}
+
+Khi overlay khởi động, nó gọi \texttt{bootstrap\_from\_tracker()} để lấy snapshot ban đầu, sau đó \texttt{join\_ring()} để thiết lập successor đầu tiên. Nếu mạng chỉ có một node, peer tự tạo vòng một phần tử với successor là chính nó. Nếu đã có nhiều node, peer chọn successor bằng hàm \texttt{find\_successor(local\_node\_id + 1)} rồi chủ động mở kết nối TCP tới successor nếu cần.
+
+\subsection{Cơ chế duy trì vòng và làm mới trạng thái}
+Lớp \texttt{DHTOverlay} không giả định rằng thông tin bootstrap là bất biến. Thay vào đó, nó liên tục làm mới trạng thái bằng ba cơ chế.
+
+Thứ nhất, \texttt{refresh\_known\_nodes()} gọi hàm discovery để lấy lại danh sách peer đang sống và thay thế toàn bộ cache cũ bằng snapshot mới. Thiết kế này quan trọng vì nó giúp loại bỏ node chết khỏi \texttt{known\_nodes} thay vì để dữ liệu stale tồn tại vô hạn.
+
+Thứ hai, \texttt{recompute\_routing\_state()} tính lại successor, predecessor và toàn bộ finger table từ snapshot hiện có. Với mỗi chỉ số finger $i$, peer dùng điểm bắt đầu
+\begin{center}
+\[
+\texttt{start}_i = (\texttt{local\_node\_id} + 2^i) \bmod 2^m
+\]
+\[
+\texttt{finger}[i] = \operatorname{successor}(\texttt{start}_i)
+\]
+\end{center}
+rồi tìm successor của điểm đó trên vòng. Vì các bước nhảy tăng theo lũy thừa của 2, finger table cho phép node tiến nhanh về phía khóa đích thay vì chỉ lần lượt đi qua từng successor.
+
+Thứ ba, overlay chạy ba luồng nền định kỳ: \texttt{stabilize()}, \texttt{fix\_next\_finger()} và \texttt{check\_predecessor()}. Chúng lần lượt đảm nhiệm việc cập nhật successor hợp lệ hơn, làm mới từng finger theo chu kỳ, và phát hiện predecessor không còn active. Các hook runtime như \texttt{prepare\_for\_channel\_join()} hoặc \texttt{on\_peer\_connected()} cũng kích hoạt refresh và recompute khi có sự kiện liên quan đến channel hoặc khi vừa hình thành một kết nối P2P mới.
+
+\subsection{Thiết kế bản tin DHT cho channel}
+Channeling trên overlay dùng ba loại bản tin chính:
+\begin{itemize}[leftmargin=2em]
+    \item \texttt{dht\_channel\_join}: yêu cầu một peer trở thành member của channel;
+    \item \texttt{dht\_channel\_publish}: yêu cầu owner nhận một thông điệp channel và fan-out đến các member;
+    \item \texttt{dht\_channel\_deliver}: bản tin cuối cùng chuyển nội dung đến đúng peer đích.
+\end{itemize}
+
+Các bản tin này đều được dựng bằng \texttt{\_build\_routed\_message()}, nên có chung các trường định tuyến như \texttt{message\_id}, \texttt{origin\_peer\_id}, \texttt{target\_key}, \texttt{target\_peer\_id}, \texttt{ttl} và \texttt{route\_path}. Điểm đáng chú ý là \texttt{route\_path} được khởi tạo ngay từ peer gửi để lưu lại đường đi nhiều hop; nhờ đó UI và API debug có thể cho biết message đã đi qua những node nào.
+
+\subsection{Luồng join channel}
+Khi một peer muốn tham gia channel, nó gọi \texttt{join\_channel(channel\_name)}. Hàm này thực hiện bốn bước:
 \begin{enumerate}[leftmargin=2em]
-    \item peer tính key từ channel name;
-    \item peer chuyển request đến neighbor gần key hơn;
-    \item request tiếp tục đi qua ring cho đến successor;
-    \item successor trở thành owner xử lý membership và fan-out.
+    \item chuẩn hóa tên channel và tính \texttt{channel\_key};
+    \item xác định owner bằng \texttt{find\_successor(channel\_key)};
+    \item tạo bản tin \texttt{dht\_channel\_join}, trong đó payload chứa \texttt{channel\_name}, \texttt{channel\_key} và thông tin member muốn tham gia;
+    \item nếu owner chính là peer hiện tại thì xử lý cục bộ, ngược lại thì đưa message vào \texttt{route\_message()} để đi qua overlay.
 \end{enumerate}
 
-\subsection{Owner fan-out đến members}
-Owner lưu danh sách members của channel. Khi nhận message cho channel, owner fan-out đến các member đang active. Nếu một member unreachable, owner đánh dấu failure và có thể retry hoặc loại khỏi membership sau TTL.
+Tại owner, hàm \texttt{handle\_channel\_join()} tạo hoặc cập nhật một bản ghi trong \texttt{owned\_channels}. Membership được lưu theo khóa \texttt{peer\_id}, nên việc join lặp lại không làm sinh bản ghi trùng. Owner đồng thời cập nhật \texttt{channel\_members\_cache}, thêm member vào \texttt{known\_nodes}, và ghi \texttt{route\_status} với trạng thái \texttt{channel\_joined}. Cách làm này cho phép owner trở nên ``sẵn sàng'' cho channel ngay khi nhận join, kể cả nếu peer đó trước đó chưa chủ động thao tác debug như refresh hay join ring bằng tay.
 
-Trong triển khai hiện tại, tracker vẫn có thể giữ metadata/debug visibility (danh sách peer, channel metadata), nhưng đường truyền cuối cho channel message là: route đến owner theo DHT overlay, rồi owner fan-out qua PeerManager.
+\subsection{Luồng gửi message trong channel}
+Khi người dùng gửi một message vào channel, peer gọi \texttt{send\_channel\_message(channel\_name, text)}. Logic của hàm này tương tự join channel: peer tính \texttt{channel\_key}, xác định owner, đóng gói payload loại \texttt{dht\_channel\_publish}, rồi hoặc xử lý cục bộ tại owner, hoặc định tuyến qua overlay.
 
-\subsection{Synchronization và failure}
-Vì owner có thể rời mạng, hệ thống cần cơ chế xử lý trạng thái vòng và chuyển ownership:
+Tại owner, \texttt{handle\_channel\_publish()} là điểm then chốt. Hàm này trước hết kiểm tra dữ liệu đầu vào như tên channel, nội dung text và \texttt{from\_peer\_id}. Sau đó, nếu payload mang theo danh sách member hợp lệ, owner sẽ hợp nhất danh sách này vào membership hiện có. Chi tiết này có ý nghĩa thực tế: khi owner mới tiếp quản sau một thay đổi topo, nó vẫn có thể bootstrap lại membership từ publish payload thay vì yêu cầu toàn bộ peer join lại từ đầu.
+
+Sau khi có membership, owner duyệt danh sách member của channel và gọi \texttt{deliver\_channel\_message()} cho từng peer, ngoại trừ peer gửi ban đầu. Do đó, đường truyền của một channel message được tách thành hai pha rõ ràng:
+\begin{enumerate}[leftmargin=2em]
+    \item định tuyến từ sender đến owner theo DHT overlay;
+    \item fan-out từ owner đến từng member bằng các bản tin deliver riêng biệt.
+\end{enumerate}
+
+\subsection{Deliver đến peer đích}
+Hàm \texttt{deliver\_channel\_message()} không gửi theo \texttt{channel\_key} nữa, mà chuyển sang gửi theo \texttt{target\_peer\_id} và \texttt{target node\_id} của từng member cụ thể. Đây là một quyết định quan trọng trong code: sau khi owner đã quyết định ``ai là người nhận'', từng gói deliver phải đi đến đúng peer đích, không quay lại logic chọn owner của channel.
+
+Khi peer đích nhận được \texttt{dht\_channel\_deliver}, hàm \texttt{handle\_channel\_deliver()} sẽ kiểm tra xem \texttt{target\_peer\_id} đã đúng với peer hiện tại hay chưa. Nếu chưa đúng, message tiếp tục được route tiếp. Nếu đã đúng, peer ghi nhận sự kiện bằng \texttt{\_record\_dht\_event()} và đưa bản tin vào hàng \texttt{dht\_events}. Mỗi event lưu các trường như tên channel, peer gửi, nội dung text, \texttt{message\_id}, \texttt{parent\_message\_id} và \texttt{route\_path}. Đây là dữ liệu mà UI dùng để hiển thị message channel và phục vụ kiểm chứng nhiều hop trong quá trình test.
+
+\subsection{Chọn next hop và tránh full mesh}
+Overlay không cố kết nối đến toàn bộ peer trong mạng. Khi cần chuyển tiếp, hàm \texttt{\_choose\_next\_hop()} ưu tiên hai chiến lược:
 \begin{itemize}[leftmargin=2em]
-    \item refresh danh sách node sống từ discovery (tracker) để cập nhật \texttt{known\_nodes};
-    \item recompute successor/predecessor/finger state khi có event (join ring, peer connected);
-    \item dùng \texttt{ttl} và seen-cache để tránh vòng lặp route và duplicate deliver;
-    \item ghi route status để quan sát kết quả định tuyến và debug failure.
+    \item nếu đã biết chính xác \texttt{target\_peer\_id}, dùng metadata của peer đó trong \texttt{known\_nodes};
+    \item nếu chỉ biết \texttt{target\_key}, chọn \texttt{closest\_preceding\_finger(target\_key)}; nếu không có finger phù hợp thì rơi về \texttt{find\_successor(target\_key)}.
 \end{itemize}
+
+Vì vậy, overlay chỉ hình thành các kết nối cần thiết để nói chuyện với successor, một số finger, hoặc các peer thực sự cần giao tiếp trong đường route hiện tại. Điều này khác căn bản với full mesh, nơi mỗi peer phải duy trì kết nối trực tiếp với mọi peer còn lại.
+
+\subsection{TTL, duplicate suppression và khả năng quan sát}
+Vì message có thể đi nhiều hop, overlay cần cơ chế tránh vòng lặp và tránh xử lý lặp. Trong code hiện tại có ba lớp bảo vệ.
+
+Thứ nhất, mỗi routed message mang theo \texttt{ttl}. Hàm \texttt{route\_message()} giảm \texttt{ttl} sau mỗi lần forward; nếu giá trị này về 0, message bị dừng và trạng thái \texttt{ttl\_expired} được ghi lại.
+
+Thứ hai, overlay duy trì \texttt{seen\_dht\_message\_ids}. Hàm \texttt{mark\_seen()} trả về true nếu một \texttt{message\_id} đã từng xuất hiện trước đó. Nhờ vậy, cùng một bản tin sẽ không bị route hoặc xử lý lặp khi xuất hiện lại trên vòng.
+
+Thứ ba, peer nhận cuối cùng dùng thêm \texttt{delivered\_dht\_message\_ids} để tránh ghi trùng sự kiện vào \texttt{dht\_events}. Điều này giúp bảo toàn tính đúng đắn ở tầng ứng dụng: một channel message hợp lệ chỉ được hiển thị một lần dù có retry hoặc duplicate ở tầng route.
+
+Song song với đó, \texttt{record\_route\_status()} lưu lại các mốc như \texttt{forwarded}, \texttt{delivered}, \texttt{duplicate}, \texttt{connect\_failed}, \texttt{no\_next\_hop} hoặc \texttt{channel\_publish\_fanout}. Đây là cơ chế quan sát rất hữu ích để debug đường đi của message, xác định chỗ hỏng, và đối chiếu với các kịch bản test hoặc benchmark.
+
+\subsection{Ý nghĩa kiến trúc}
+Xét về kiến trúc, DHT overlay cho phép hệ thống tách bài toán channel broadcast thành hai phần: tìm owner theo không gian khóa phân tán, rồi để owner quản lý membership và fan-out. Đổi lại, hệ thống phải chấp nhận thêm chi phí định tuyến nhiều hop và phải duy trì trạng thái vòng định danh. Tuy nhiên, so với việc buộc mọi peer giữ kết nối trực tiếp với nhau, cách tiếp cận này phù hợp hơn với mục tiêu mở rộng số node và giảm tài nguyên kết nối trong kiến trúc hybrid chat của nhóm.
